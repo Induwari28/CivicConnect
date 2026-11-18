@@ -15,6 +15,8 @@ public class Issue {
     private String title;
     private String description;
     private String status = "PENDING"; // PENDING, TRIAGED, RESOLVED
+    
+    private String priority = "UNCLASSIFIED"; // Added for AI Triage
 
     // This is the PostGIS spatial column (SRID 4326 is the standard GPS coordinate system)
     @Column(columnDefinition = "geometry(Point,4326)")
@@ -34,6 +36,8 @@ public class Issue {
     public void setDescription(String description) { this.description = description; }
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
+    public String getPriority() { return priority; }
+    public void setPriority(String priority) { this.priority = priority; }
     public Point getLocation() { return location; }
     public void setLocation(Point location) { this.location = location; }
     public LocalDateTime getCreatedAt() { return createdAt; }

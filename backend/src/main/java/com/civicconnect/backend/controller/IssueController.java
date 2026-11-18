@@ -3,6 +3,7 @@ package com.civicconnect.backend.controller;
 import com.civicconnect.backend.dto.IssueRequest;
 import com.civicconnect.backend.model.Issue;
 import com.civicconnect.backend.repository.IssueRepository;
+import com.civicconnect.backend.service.GeminiService;
 import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.GeometryFactory;
 import org.locationtech.jts.geom.Point;
@@ -18,14 +19,16 @@ import java.util.stream.Collectors;
 public class IssueController {
 
     private final IssueRepository issueRepository;
+    private final GeminiService geminiService;
     private final GeometryFactory geometryFactory = new GeometryFactory(new PrecisionModel(), 4326);
 
-    public IssueController(IssueRepository issueRepository) {
+    public IssueController(IssueRepository issueRepository, GeminiService geminiService) {
         this.issueRepository = issueRepository;
+        this.geminiService = geminiService;
     }
 
-    // Modern Java 21 Record to act as our DTO, avoiding complex Map generics entirely
-    public record IssueResponse(Long id, String title, String description, String status, double latitude, double longitude) {}
+    // Updated DTO Record to include priority
+    public record IssueResponse(Long id, String title, String description, String status, String priority, double latitude, double longitude) {}
 
     @GetMapping
     public List<IssueResponse> getAllIssues() {
@@ -34,8 +37,9 @@ public class IssueController {
                 issue.getTitle(),
                 issue.getDescription(),
                 issue.getStatus(),
-                issue.getLocation().getY(), // latitude
-                issue.getLocation().getX()  // longitude
+                issue.getPriority(),
+                issue.getLocation().getY(),
+                issue.getLocation().getX()
         )).collect(Collectors.toList());
     }
 
@@ -45,9 +49,15 @@ public class IssueController {
         issue.setTitle(request.getTitle());
         issue.setDescription(request.getDescription());
 
+        // 1. Ask Gemini to analyze the issue and assign a priority
+        String aiPriority = geminiService.analyzeIssue(request.getTitle(), request.getDescription());
+        issue.setPriority(aiPriority);
+
+        // 2. Convert standard GPS coordinates into PostGIS spatial point
         Point location = geometryFactory.createPoint(new Coordinate(request.getLongitude(), request.getLatitude()));
         issue.setLocation(location);
 
+        // 3. Save to database
         Issue savedIssue = issueRepository.save(issue);
         
         return new IssueResponse(
@@ -55,6 +65,7 @@ public class IssueController {
                 savedIssue.getTitle(),
                 savedIssue.getDescription(),
                 savedIssue.getStatus(),
+                savedIssue.getPriority(),
                 savedIssue.getLocation().getY(),
                 savedIssue.getLocation().getX()
         );
