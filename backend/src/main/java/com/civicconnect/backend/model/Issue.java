@@ -18,6 +18,8 @@ public class Issue {
     
     private String priority = "UNCLASSIFIED"; // Added for AI Triage
 
+    private String imageFilename;
+
     // This is the PostGIS spatial column (SRID 4326 is the standard GPS coordinate system)
     @Column(columnDefinition = "geometry(Point,4326)")
     private Point location;
@@ -38,6 +40,8 @@ public class Issue {
     public void setStatus(String status) { this.status = status; }
     public String getPriority() { return priority; }
     public void setPriority(String priority) { this.priority = priority; }
+    public String getImageFilename() { return imageFilename; }
+    public void setImageFilename(String imageFilename) { this.imageFilename = imageFilename; }
     public Point getLocation() { return location; }
     public void setLocation(Point location) { this.location = location; }
     public LocalDateTime getCreatedAt() { return createdAt; }

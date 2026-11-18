@@ -13,6 +13,11 @@ const router = createRouter({
       path: '/map',
       name: 'map',
       component: () => import('../views/SmartMapView.vue')
+    },
+    {
+      path: '/admin',
+      name: 'admin',
+      component: () => import('../views/AdminDashboardView.vue')
     }
   ]
 })

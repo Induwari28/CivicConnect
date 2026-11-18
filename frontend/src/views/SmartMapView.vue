@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onBeforeUnmount, onMounted } from 'vue'
 import axios from 'axios'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
+import type { Issue } from '@/types/issue'
 
 // Fix for Leaflet marker icons not loading correctly in Vite/Vue projects
 import icon from 'leaflet/dist/images/marker-icon.png'
@@ -16,40 +17,87 @@ const DefaultIcon = L.icon({
 })
 L.Marker.prototype.options.icon = DefaultIcon
 
-const mapContainer = ref(null)
+const mapContainer = ref<HTMLDivElement | null>(null)
+const issues = ref<Issue[]>([])
+const loading = ref(true)
+const loadError = ref('')
+let map: L.Map | null = null
+let markersLayer: L.LayerGroup | null = null
 
-onMounted(async () => {
-  // 1. Initialize map centered near University of Moratuwa
-  const map = L.map(mapContainer.value).setView([6.7969, 79.9018], 14)
+const isValidLocation = (issue: Issue) =>
+  Number.isFinite(issue.latitude) &&
+  Number.isFinite(issue.longitude) &&
+  issue.latitude >= -90 &&
+  issue.latitude <= 90 &&
+  issue.longitude >= -180 &&
+  issue.longitude <= 180
 
-  // 2. Load the OpenStreetMap tiles
+const createPopup = (issue: Issue) => {
+  const content = document.createElement('div')
+  const title = document.createElement('strong')
+  title.className = 'block text-blue-700 text-lg'
+  title.textContent = issue.title
+
+  const description = document.createElement('p')
+  description.className = 'my-2 text-gray-600'
+  description.textContent = issue.description
+
+  const details = document.createElement('p')
+  details.className = 'text-sm text-gray-700'
+  details.textContent = `Status: ${issue.status} · Priority: ${issue.priority}`
+
+  content.append(title, description, details)
+  return content
+}
+
+const fetchIssues = async () => {
+  const currentMap = map
+  const currentMarkersLayer = markersLayer
+  if (!currentMarkersLayer || !currentMap) return
+
+  loading.value = true
+  loadError.value = ''
+  try {
+    const response = await axios.get<Issue[]>('http://localhost:8081/api/issues')
+    issues.value = response.data.filter(isValidLocation)
+    currentMarkersLayer.clearLayers()
+
+    issues.value.forEach((issue) => {
+      L.marker([issue.latitude, issue.longitude])
+        .bindPopup(createPopup(issue))
+        .addTo(currentMarkersLayer)
+    })
+
+    if (issues.value.length > 0) {
+      const bounds = L.latLngBounds(
+        issues.value.map((issue) => L.latLng(issue.latitude, issue.longitude))
+      )
+      currentMap.fitBounds(bounds, { padding: [24, 24], maxZoom: 14 })
+    }
+  } catch (error) {
+    console.error('Error fetching map data:', error)
+    loadError.value = 'Unable to load reported issues. Please try again.'
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(() => {
+  if (!mapContainer.value) return
+
+  map = L.map(mapContainer.value).setView([6.7969, 79.9018], 14)
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap contributors'
   }).addTo(map)
+  markersLayer = L.layerGroup().addTo(map)
 
-  // 3. Fetch the spatial data from Spring Boot
-  try {
-    const response = await axios.get('http://localhost:8081/api/issues')
-    const issues = response.data
+  void fetchIssues()
+})
 
-    // 4. Plot each issue as a marker on the map
-    issues.forEach(issue => {
-      const marker = L.marker([issue.latitude, issue.longitude]).addTo(map)
-      
-      // Add a popup bubble when you click the marker
-      marker.bindPopup(`
-        <div class="font-sans">
-          <strong class="text-blue-700 text-lg">${issue.title}</strong><br/>
-          <span class="text-gray-600">${issue.description}</span><br/><br/>
-          <span class="bg-yellow-100 text-yellow-800 px-2 py-1 text-xs font-bold rounded-full border border-yellow-200">
-            Status: ${issue.status}
-          </span>
-        </div>
-      `)
-    })
-  } catch (error) {
-    console.error("Error fetching map data:", error)
-  }
+onBeforeUnmount(() => {
+  map?.remove()
+  map = null
+  markersLayer = null
 })
 </script>
 
@@ -57,9 +105,25 @@ onMounted(async () => {
   <div class="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
     <h2 class="text-2xl font-bold text-gray-800 mb-4">Geospatial Intelligence Map</h2>
     <p class="text-gray-600 mb-4">Interactive view of all reported civic issues.</p>
-    
-    <!-- This div holds the Leaflet map -->
-    <div ref="mapContainer" class="w-full h-[600px] rounded-md border border-gray-300 z-0"></div>
+    <div class="mb-3 min-h-6">
+      <p v-if="loading" role="status" class="text-sm text-gray-500">Loading reported issues...</p>
+      <div v-else-if="loadError" role="alert" class="flex items-center gap-3 text-sm text-red-700">
+        <span>{{ loadError }}</span>
+        <button type="button" class="font-semibold underline" @click="fetchIssues">Retry</button>
+      </div>
+      <p v-else-if="issues.length === 0" role="status" class="text-sm text-gray-500">
+        No issues with valid locations have been reported yet.
+      </p>
+      <p v-else role="status" class="text-sm text-gray-500">
+        Showing {{ issues.length }} reported {{ issues.length === 1 ? 'issue' : 'issues' }}.
+      </p>
+    </div>
+    <div
+      ref="mapContainer"
+      role="region"
+      aria-label="Map of civic issues"
+      class="w-full h-[600px] rounded-md border border-gray-300 z-0"
+    ></div>
   </div>
 </template>
 

@@ -1,0 +1,24 @@
+{
+  "properties": [
+    {
+      "name": "gemini.api.key",
+      "type": "java.lang.String",
+      "description": "API key used to request Gemini issue triage."
+    },
+    {
+      "name": "app.admin.username",
+      "type": "java.lang.String",
+      "description": "Environment-configured admin account username."
+    },
+    {
+      "name": "app.admin.password",
+      "type": "java.lang.String",
+      "description": "Environment-configured admin account password."
+    },
+    {
+      "name": "app.upload.dir",
+      "type": "java.lang.String",
+      "description": "Directory where uploaded issue images are stored."
+    }
+  ]
+}

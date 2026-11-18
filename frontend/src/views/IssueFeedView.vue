@@ -1,12 +1,21 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import axios from 'axios'
+import type { Issue } from '@/types/issue'
 
-const issues = ref([])
+const API_BASE_URL = 'http://localhost:8081'
+const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024
+const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
+
+const issues = ref<Issue[]>([])
 const loading = ref(true)
 const isSubmitting = ref(false)
 const isLocating = ref(false)
 const locationError = ref('')
+const selectedImage = ref<File | null>(null)
+const imageError = ref('')
+const submitError = ref('')
+const imageInput = ref<HTMLInputElement | null>(null)
 
 const newIssue = ref<{
   title: string
@@ -55,9 +64,31 @@ const useMyLocation = () => {
   )
 }
 
+const handleImageSelection = (event: Event) => {
+  const input = event.currentTarget
+  if (!(input instanceof HTMLInputElement)) return
+
+  const image = input.files?.[0] ?? null
+  imageError.value = ''
+  selectedImage.value = null
+
+  if (image && image.size > MAX_IMAGE_SIZE_BYTES) {
+    imageError.value = 'Choose an image that is 5 MB or smaller.'
+    input.value = ''
+    return
+  }
+  if (image?.type && !ALLOWED_IMAGE_TYPES.has(image.type)) {
+    imageError.value = 'Choose a JPEG, PNG, GIF, or WebP image.'
+    input.value = ''
+    return
+  }
+
+  selectedImage.value = image
+}
+
 const fetchIssues = async () => {
   try {
-    const response = await axios.get('http://localhost:8081/api/issues')
+    const response = await axios.get<Issue[]>(`${API_BASE_URL}/api/issues`)
     issues.value = response.data.reverse()
   } catch (error) {
     console.error("Error fetching issues:", error)
@@ -71,17 +102,40 @@ const submitIssue = async () => {
   if (latitude === null || longitude === null) return
 
   isSubmitting.value = true
+  submitError.value = ''
   try {
-    await axios.post('http://localhost:8081/api/issues', {
-      ...newIssue.value,
+    const issuePayload = {
+      title: newIssue.value.title,
+      description: newIssue.value.description,
       latitude,
       longitude
-    })
+    }
+
+    if (selectedImage.value) {
+      const formData = new FormData()
+      Object.entries(issuePayload).forEach(([key, value]) => formData.append(key, value.toString()))
+      formData.append('image', selectedImage.value)
+      await axios.post(`${API_BASE_URL}/api/issues`, formData)
+    } else {
+      await axios.post(`${API_BASE_URL}/api/issues`, issuePayload)
+    }
     newIssue.value.title = ''
     newIssue.value.description = ''
+    selectedImage.value = null
+    imageError.value = ''
+    if (imageInput.value) imageInput.value.value = ''
     await fetchIssues()
   } catch (error) {
     console.error("Error submitting issue:", error)
+    if (axios.isAxiosError(error) && error.response?.status === 413) {
+      submitError.value = 'The selected image exceeds the 5 MB upload limit.'
+    } else if (axios.isAxiosError(error) && error.response?.status === 400) {
+      submitError.value = 'The report or image was rejected. Check the selected file and required fields.'
+    } else if (axios.isAxiosError(error) && error.response?.status === 415) {
+      submitError.value = 'The backend rejected the upload format. Restart it to load the multipart upload endpoint.'
+    } else {
+      submitError.value = 'Unable to submit this report. Please try again.'
+    }
   } finally {
     isSubmitting.value = false
   }
@@ -109,6 +163,23 @@ onMounted(() => {
                     class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"></textarea>
         </div>
         <div>
+          <label for="issue-image" class="block text-sm font-medium text-gray-700 mb-1">Photo (optional)</label>
+          <input
+            id="issue-image"
+            ref="imageInput"
+            type="file"
+            accept="image/jpeg,image/png,image/gif,image/webp"
+            :disabled="isSubmitting"
+            @change="handleImageSelection"
+            class="w-full text-sm text-gray-600 file:mr-3 file:rounded-md file:border-0 file:bg-blue-50 file:px-3 file:py-2 file:font-semibold file:text-blue-700 hover:file:bg-blue-100"
+          >
+          <p v-if="imageError" role="alert" class="mt-1 text-sm text-red-600">{{ imageError }}</p>
+          <p v-else-if="selectedImage" class="mt-1 text-sm text-gray-500">
+            {{ selectedImage.name }} · {{ (selectedImage.size / 1024 / 1024).toFixed(2) }} MB
+          </p>
+          <p v-else class="mt-1 text-xs text-gray-500">JPEG, PNG, GIF, or WebP; up to 5 MB.</p>
+        </div>
+        <div>
           <button type="button" @click="useMyLocation" :disabled="isLocating"
                   class="w-full border border-blue-600 text-blue-700 hover:bg-blue-50 font-semibold py-2 px-4 rounded-md transition-colors disabled:opacity-50">
             {{ isLocating ? 'Getting Location...' : 'Use My Location' }}
@@ -123,6 +194,7 @@ onMounted(() => {
                 class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md transition-colors disabled:opacity-50">
           {{ isSubmitting ? 'Submitting...' : 'Submit Report' }}
         </button>
+        <p v-if="submitError" role="alert" class="text-sm text-red-600">{{ submitError }}</p>
       </form>
     </div>
 
@@ -154,6 +226,13 @@ onMounted(() => {
             </div>
           </div>
           <p class="text-gray-600 text-sm mb-3">{{ issue.description }}</p>
+          <img
+            v-if="issue.imageUrl"
+            :src="`${API_BASE_URL}${issue.imageUrl}`"
+            :alt="`Photo attached to ${issue.title}`"
+            loading="lazy"
+            class="mb-3 max-h-64 w-full rounded-md object-cover"
+          >
           <p class="text-xs text-gray-400 font-mono">Location: {{ issue.latitude }}, {{ issue.longitude }}</p>
         </div>
       </div>
