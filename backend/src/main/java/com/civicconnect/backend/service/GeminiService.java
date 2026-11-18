@@ -5,9 +5,11 @@ import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestTemplate;
 
-import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Service
 public class GeminiService {
@@ -17,20 +19,13 @@ public class GeminiService {
 
     private final RestTemplate restTemplate = new RestTemplate();
 
-    public record GeminiPart(String text) {}
-    public record GeminiContent(List<GeminiPart> parts) {}
-    public record GeminiCandidate(GeminiContent content) {}
-    public record GeminiResponse(List<GeminiCandidate> candidates) {}
-
     public String analyzeIssue(String title, String description) {
-        String url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + apiKey;
+        String url = "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=" + apiKey;
         
-        // Sanitize inputs so quotes don't break our JSON
         String safeTitle = title.replace("\"", "'").replace("\n", " ");
         String safeDesc = description.replace("\"", "'").replace("\n", " ");
-        String prompt = "Analyze this civic issue and respond with a single word priority (HIGH, MEDIUM, or LOW). Title: " + safeTitle + ". Description: " + safeDesc;
+        String prompt = "Analyze this civic issue and respond with ONLY a single word priority (HIGH, MEDIUM, or LOW). Title: " + safeTitle + ". Description: " + safeDesc;
 
-        // Build a raw JSON string to completely avoid Java Map compilation errors
         String jsonBody = "{\"contents\": [{\"parts\": [{\"text\": \"" + prompt + "\"}]}]}";
 
         HttpHeaders headers = new HttpHeaders();
@@ -39,14 +34,30 @@ public class GeminiService {
         HttpEntity<String> request = new HttpEntity<>(jsonBody, headers);
 
         try {
-            GeminiResponse response = restTemplate.postForObject(url, request, GeminiResponse.class);
-            if (response != null && response.candidates() != null && !response.candidates().isEmpty()) {
-                return response.candidates().get(0).content().parts().get(0).text().trim();
+            String rawResponse = restTemplate.postForObject(url, request, String.class);
+            
+            // Print exactly what Google sends back to the terminal
+            System.out.println("\n--- RAW GEMINI RESPONSE ---");
+            System.out.println(rawResponse);
+            System.out.println("---------------------------\n");
+            
+            // Bulletproof Regex extraction
+            Pattern pattern = Pattern.compile("\"text\"\\s*:\\s*\"([^\"]+)\"");
+            Matcher matcher = pattern.matcher(rawResponse);
+            
+            if (matcher.find()) {
+                String text = matcher.group(1).toUpperCase();
+                if (text.contains("HIGH")) return "HIGH";
+                if (text.contains("MEDIUM")) return "MEDIUM";
+                if (text.contains("LOW")) return "LOW";
             }
+            
             return "UNCLASSIFIED";
+            
+        } catch (HttpStatusCodeException e) {
+            return e.getStatusCode().value() + "_ERROR";
         } catch (Exception e) {
-            System.err.println("Gemini API failed: " + e.getMessage());
-            return "UNCLASSIFIED";
+            return "API_ERROR";
         }
     }
 }
