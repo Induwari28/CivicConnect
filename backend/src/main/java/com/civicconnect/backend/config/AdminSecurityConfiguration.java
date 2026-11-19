@@ -33,10 +33,11 @@ public class AdminSecurityConfiguration {
                 .cors(Customizer.withDefaults())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(authorize -> authorize
-                        .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
-                        .requestMatchers(HttpMethod.PATCH, "/api/issues/*/status").hasRole("ADMIN")
-                        .requestMatchers(HttpMethod.GET, "/api/issues/admin").hasRole("ADMIN")
-                        .anyRequest().permitAll())
+        .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+        .requestMatchers(HttpMethod.PATCH, "/api/issues/*/status").hasRole("ADMIN")
+        .requestMatchers(HttpMethod.DELETE, "/api/issues/*").hasRole("ADMIN")
+        .requestMatchers(HttpMethod.GET, "/api/issues/admin").hasRole("ADMIN")
+        .anyRequest().permitAll())
                 .httpBasic(Customizer.withDefaults())
                 .build();
     }

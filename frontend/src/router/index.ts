@@ -1,16 +1,22 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import HomeView from '@/views/HomeView.vue'
 import IssueFeedView from '@/views/IssueFeedView.vue'
 import SmartMapView from '@/views/SmartMapView.vue'
 import AnalyticsView from '@/views/AnalyticsView.vue'
 import ServicesView from '@/views/ServicesView.vue'
-import AdminDashboardView from '@/views/AdminDashboardView.vue'
 import MyReportsView from '@/views/MyReportsView.vue'
+import AdminDashboardView from '@/views/AdminDashboardView.vue'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     {
       path: '/',
+      name: 'home',
+      component: HomeView
+    },
+    {
+      path: '/feed',
       name: 'feed',
       component: IssueFeedView
     },

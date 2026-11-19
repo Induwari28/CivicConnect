@@ -9,4 +9,5 @@ export interface Issue {
   latitude: number
   longitude: number
   imageUrl: string | null
+  reportCount?: number
 }

@@ -1,13 +1,18 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import axios from 'axios'
 import type { Issue } from '@/types/issue'
 
+const route = useRoute()
 const API_BASE_URL = 'http://localhost:8081'
 const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024
+const GEO_CACHE_KEY = 'civicconnect_nominatim_cache_v1'
+const TRACKED_IDS_KEY = 'civicconnect_tracked_ids'
 
 const issues = ref<Issue[]>([])
 const addressMap = ref<Record<number, string>>({})
+const inFlightKeys = new Set<string>()
 const confirmingId = ref<number | null>(null)
 const selectedIssue = ref<Issue | null>(null)
 const copiedGps = ref(false)
@@ -28,6 +33,10 @@ const searchQuery = ref('')
 const priorityFilter = ref('ALL')
 const statusFilter = ref('ALL')
 const sortBy = ref<'NEWEST' | 'MOST_CONFIRMED' | 'PRIORITY'>('NEWEST')
+const availableAreas = computed(() => [
+  'ALL',
+  ...Array.from(new Set(Object.values(addressMap.value))).sort((a, b) => a.localeCompare(b))
+])
 
 const announcements = [
   {
@@ -54,6 +63,38 @@ const newIssue = ref({
   longitude: null as number | null
 })
 
+const loadGeoCache = (): Record<string, string> => {
+  try {
+    const raw = localStorage.getItem(GEO_CACHE_KEY)
+    return raw ? JSON.parse(raw) : {}
+  } catch {
+    return {}
+  }
+}
+
+const saveGeoCache = (cache: Record<string, string>) => {
+  try {
+    localStorage.setItem(GEO_CACHE_KEY, JSON.stringify(cache))
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+const geoCache = ref<Record<string, string>>(loadGeoCache())
+
+const trackLocalId = (id: number) => {
+  try {
+    const raw = localStorage.getItem(TRACKED_IDS_KEY)
+    const ids: number[] = raw ? JSON.parse(raw) : []
+    if (!ids.includes(id)) {
+      ids.push(id)
+      localStorage.setItem(TRACKED_IDS_KEY, JSON.stringify(ids))
+    }
+  } catch (err) {
+    console.error('Failed to track issue ID in localStorage:', err)
+  }
+}
+
 const formatPriority = (priority?: string) => {
   if (!priority || priority.includes('ERROR')) return 'UNCLASSIFIED'
   return priority.toUpperCase()
@@ -67,23 +108,11 @@ const priorityRank = (priority?: string) => {
   return 0
 }
 
-const getStatusStep = (status: string) => {
+const getStatusStep = (status: Issue['status']) => {
   if (status === 'RESOLVED') return 3
   if (status === 'IN_PROGRESS') return 2
   return 1
 }
-
-const availableAreas = computed(() => {
-  const found = new Set<string>()
-  for (const issue of issues.value) {
-    const addr = addressMap.value[issue.id] || ''
-    if (addr.toLowerCase().includes('molpe')) found.add('Molpe')
-    if (addr.toLowerCase().includes('katubedda')) found.add('Katubedda')
-    if (addr.toLowerCase().includes('soysapura')) found.add('Soysapura')
-    if (addr.toLowerCase().includes('moratuwa')) found.add('Moratuwa')
-  }
-  return ['ALL', ...Array.from(found)]
-})
 
 const openIssueModal = (issue: Issue) => {
   copiedGps.value = false
@@ -103,18 +132,78 @@ const copyCoordinates = async (issue: Issue) => {
   }
 }
 
+const getCoordKey = (lat: number, lon: number) => `${lat.toFixed(4)},${lon.toFixed(4)}`
+
+const getFallbackAreaName = (lat: number, lon: number) => {
+  if (Math.abs(lat - 6.7969) < 0.004 && Math.abs(lon - 79.9018) < 0.004) {
+    return 'Katubedda / University of Moratuwa, Moratuwa'
+  }
+  if (Math.abs(lat - 6.793) < 0.004 && Math.abs(lon - 79.9011) < 0.004) {
+    return 'Molpe, Moratuwa'
+  }
+  return 'Moratuwa Area'
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
 const resolveAddresses = async (list: Issue[]) => {
   for (const item of list) {
-    if (addressMap.value[item.id] || item.latitude == null || item.longitude == null) continue
+    if (addressMap.value[item.id] || item.latitude == null || item.longitude == null) {
+      continue
+    }
+
+    const key = getCoordKey(item.latitude, item.longitude)
+
+    if (geoCache.value[key]) {
+      addressMap.value[item.id] = geoCache.value[key]
+      continue
+    }
+
+    addressMap.value[item.id] = getFallbackAreaName(item.latitude, item.longitude)
+
+    if (inFlightKeys.has(key)) {
+      continue
+    }
+
+    inFlightKeys.add(key)
     try {
-      const res = await fetch(
-        `https://nominatim.openstreetmap.org/reverse?format=json&lat=${item.latitude}&lon=${item.longitude}`
-      )
+      await sleep(1100)
+      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(
+        item.latitude
+      )}&lon=${encodeURIComponent(item.longitude)}`
+      const res = await fetch(url, {
+        headers: {
+          Accept: 'application/json'
+        }
+      })
+
+      if (!res.ok) {
+        continue
+      }
+
       const data = await res.json()
-      const parts = (data.display_name || '').split(',').map((s: string) => s.trim()).filter(Boolean)
-      addressMap.value[item.id] = parts.slice(0, 3).join(', ') || 'Moratuwa Area'
+      const parts: string[] = (data.display_name || '')
+        .split(',')
+        .map((s: string) => s.trim())
+        .filter(Boolean)
+      const resolved = parts.slice(0, 3).join(', ') || getFallbackAreaName(item.latitude, item.longitude)
+
+      geoCache.value[key] = resolved
+      saveGeoCache(geoCache.value)
+
+      for (const target of issues.value) {
+        if (
+          target.latitude != null &&
+          target.longitude != null &&
+          getCoordKey(target.latitude, target.longitude) === key
+        ) {
+          addressMap.value[target.id] = resolved
+        }
+      }
     } catch {
-      addressMap.value[item.id] = 'Moratuwa Area'
+      // Keep fallback label silently on rate limits or CORS blocks
+    } finally {
+      inFlightKeys.delete(key)
     }
   }
 }
@@ -157,7 +246,6 @@ const fetchIssues = async () => {
   try {
     const res = await axios.get<Issue[]>(`${API_BASE_URL}/api/issues`)
     issues.value = res.data.slice().reverse()
-    resolveAddresses(issues.value)
   } catch (err) {
     console.error(err)
   } finally {
@@ -182,7 +270,11 @@ const submitIssue = async () => {
     formData.append('longitude', newIssue.value.longitude.toString())
     if (selectedImage.value) formData.append('image', selectedImage.value)
 
-    await axios.post(`${API_BASE_URL}/api/issues`, formData)
+    const res = await axios.post<Issue>(`${API_BASE_URL}/api/issues`, formData)
+    if (res.data?.id) {
+      trackLocalId(res.data.id)
+    }
+
     newIssue.value = {
       category: 'Roads & Drainage',
       title: '',
@@ -205,6 +297,7 @@ const confirmIssue = async (id: number) => {
   confirmingId.value = id
   try {
     await axios.post(`${API_BASE_URL}/api/issues/${id}/confirm`)
+    trackLocalId(id)
     await fetchIssues()
     if (selectedIssue.value?.id === id) {
       const updated = issues.value.find(i => i.id === id)
@@ -229,9 +322,7 @@ const filteredIssues = computed(() => {
     const matchesPriority =
       priorityFilter.value === 'ALL' || formatPriority(issue.priority) === priorityFilter.value
     const matchesStatus = statusFilter.value === 'ALL' || issue.status === statusFilter.value
-    const matchesArea =
-      areaFilter.value === 'ALL' ||
-      (addressMap.value[issue.id] || '').toLowerCase().includes(areaFilter.value.toLowerCase())
+    const matchesArea = areaFilter.value === 'ALL' || addressMap.value[issue.id] === areaFilter.value
 
     return matchesSearch && matchesCategory && matchesPriority && matchesStatus && matchesArea
   })
@@ -245,8 +336,35 @@ const filteredIssues = computed(() => {
   return list
 })
 
-watch(filteredIssues, (list) => resolveAddresses(list))
-onMounted(fetchIssues)
+const applyRouteQueries = () => {
+  const qCategory = typeof route.query.category === 'string' ? route.query.category : ''
+  if (qCategory && categories.includes(qCategory)) {
+    selectedCategory.value = qCategory
+  }
+
+  const qLat = typeof route.query.lat === 'string' ? Number(route.query.lat) : NaN
+  const qLng = typeof route.query.lng === 'string' ? Number(route.query.lng) : NaN
+  if (!Number.isNaN(qLat) && !Number.isNaN(qLng)) {
+    newIssue.value.latitude = qLat
+    newIssue.value.longitude = qLng
+    showReportModal.value = true
+  }
+}
+
+watch(
+  issues,
+  (list) => {
+    if (list.length > 0) {
+      resolveAddresses(list)
+    }
+  },
+  { immediate: true }
+)
+
+onMounted(async () => {
+  applyRouteQueries()
+  await fetchIssues()
+})
 </script>
 
 <template>
