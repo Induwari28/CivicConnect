@@ -10,19 +10,17 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 @Configuration
 public class UploadedImageWebConfiguration implements WebMvcConfigurer {
+    private final String uploadLocation;
 
-    private final Path uploadDirectory;
-
-    public UploadedImageWebConfiguration(@Value("${app.upload.dir:uploads}") String uploadDirectory) {
-        this.uploadDirectory = Paths.get(uploadDirectory).toAbsolutePath().normalize();
+    public UploadedImageWebConfiguration(@Value("${app.upload.dir:${user.home}/.civicconnect/uploads}") String uploadDir) {
+        Path uploadPath = Paths.get(uploadDir).toAbsolutePath().normalize();
+        String location = uploadPath.toUri().toString();
+        this.uploadLocation = location.endsWith("/") ? location : location + "/";
     }
 
     @Override
     public void addResourceHandlers(ResourceHandlerRegistry registry) {
-        String location = uploadDirectory.toUri().toString();
-        if (!location.endsWith("/")) {
-            location += "/";
-        }
-        registry.addResourceHandler("/uploads/**").addResourceLocations(location);
+        registry.addResourceHandler("/uploads/**")
+                .addResourceLocations(uploadLocation);
     }
 }

@@ -2,6 +2,7 @@ package com.civicconnect.backend.controller;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Optional;
 
 import com.civicconnect.backend.dto.IssueRequest;
 import com.civicconnect.backend.model.Issue;
@@ -54,7 +55,8 @@ public class IssueController {
             String priority,
             double latitude,
             double longitude,
-            String imageUrl) {}
+            String imageUrl,
+            int reportCount) {}
 
     public record StatusUpdateRequest(IssueStatus status) {}
 
@@ -70,7 +72,7 @@ public class IssueController {
 
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
     public IssueResponse createIssue(@RequestBody IssueRequest request) {
-        return createIssue(
+        return processAndSaveIssue(
                 request.getTitle(),
                 request.getDescription(),
                 request.getLatitude(),
@@ -85,8 +87,22 @@ public class IssueController {
             @RequestParam("latitude") double latitude,
             @RequestParam("longitude") double longitude,
             @RequestParam(value = "image", required = false) MultipartFile image) {
-        return createIssue(title, description, latitude, longitude, image);
+        return processAndSaveIssue(title, description, latitude, longitude, image);
     }
+
+    @PostMapping("/{id}/confirm")
+public IssueResponse confirmIssue(@PathVariable Long id) {
+    Issue issue = issueRepository.findById(id)
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Issue not found."));
+
+    issue.incrementReportCount();
+
+    if (issue.getReportCount() >= 3 && !"HIGH".equalsIgnoreCase(issue.getPriority())) {
+        issue.setPriority("HIGH");
+    }
+
+    return toResponse(issueRepository.save(issue));
+}
 
     @PatchMapping("/{id}/status")
     public IssueResponse updateStatus(@PathVariable Long id, @RequestBody StatusUpdateRequest request) {
@@ -100,57 +116,82 @@ public class IssueController {
         return toResponse(issueRepository.save(issue));
     }
 
-    private IssueResponse createIssue(
+    private IssueResponse processAndSaveIssue(
             String title,
             String description,
             double latitude,
             double longitude,
             MultipartFile image) {
+
+        // 1. Check for spatial duplicate within 50 meters
+        Optional<Issue> existingDuplicate = issueRepository.findNearbyDuplicate(latitude, longitude, title);
+
+        if (existingDuplicate.isPresent()) {
+            Issue duplicate = existingDuplicate.get();
+            duplicate.incrementReportCount();
+            
+            // Smart Crowdsourcing Boost: 3+ reports automatically escalates priority to HIGH
+            if (duplicate.getReportCount() >= 3 && !"HIGH".equalsIgnoreCase(duplicate.getPriority())) {
+                duplicate.setPriority("HIGH");
+            }
+            
+            return toResponse(issueRepository.save(duplicate));
+        }
+
+        // 2. Otherwise, create a brand-new issue
         Issue issue = new Issue();
         issue.setTitle(title);
         issue.setDescription(description);
+        issue.setReportCount(1);
         Point location = geometryFactory.createPoint(new Coordinate(longitude, latitude));
         issue.setLocation(location);
+        issue.setStatus(IssueStatus.PENDING.name());
 
-        String imageFilename;
+        String storedImageFilename = null;
         try {
-            imageFilename = imageStorageService.store(image);
+            if (image != null && !image.isEmpty()) {
+                storedImageFilename = imageStorageService.store(image);
+            }
         } catch (IOException exception) {
             throw new ResponseStatusException(
                     HttpStatus.INTERNAL_SERVER_ERROR,
                     "Unable to store the uploaded image.",
                     exception);
         }
-        issue.setImageFilename(imageFilename);
+        if (storedImageFilename != null) {
+            issue.setImageUrl("/uploads/" + storedImageFilename);
+        }
 
         try {
             issue.setPriority(geminiService.analyzeIssue(title, description));
             return toResponse(issueRepository.save(issue));
         } catch (RuntimeException exception) {
-            cleanupStoredImage(imageFilename, exception);
+            cleanupStoredImage(storedImageFilename, exception);
             throw exception;
         }
     }
 
     private IssueResponse toResponse(Issue issue) {
-        String imageUrl = issue.getImageFilename() == null
-                ? null
-                : "/uploads/" + issue.getImageFilename();
+        Point location = issue.getLocation();
+        if (location == null) {
+            throw new IllegalStateException("Issue location is missing.");
+        }
         return new IssueResponse(
                 issue.getId(),
                 issue.getTitle(),
                 issue.getDescription(),
                 issue.getStatus(),
                 issue.getPriority(),
-                issue.getLocation().getY(),
-                issue.getLocation().getX(),
-                imageUrl);
+                location.getY(),
+                location.getX(),
+                issue.getImageUrl(),
+                issue.getReportCount());
     }
 
-    private void cleanupStoredImage(String imageFilename, RuntimeException originalException) {
-        if (imageFilename == null) return;
+    private void cleanupStoredImage(String filename, RuntimeException originalException) {
+        if (filename == null) return;
         try {
-            imageStorageService.delete(imageFilename);
+            imageStorageService.delete(filename);
         } catch (IOException cleanupException) {
             originalException.addSuppressed(cleanupException);
         }

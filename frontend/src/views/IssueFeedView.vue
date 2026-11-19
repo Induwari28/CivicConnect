@@ -1,13 +1,16 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import axios from 'axios'
 import type { Issue } from '@/types/issue'
 
 const API_BASE_URL = 'http://localhost:8081'
 const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024
-const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
 
 const issues = ref<Issue[]>([])
+const addressMap = ref<Record<number, string>>({})
+const confirmingId = ref<number | null>(null)
+const selectedIssue = ref<Issue | null>(null)
+const copiedGps = ref(false)
 const loading = ref(true)
 const isSubmitting = ref(false)
 const isLocating = ref(false)
@@ -16,227 +19,664 @@ const selectedImage = ref<File | null>(null)
 const imageError = ref('')
 const submitError = ref('')
 const imageInput = ref<HTMLInputElement | null>(null)
+const showReportModal = ref(false)
 
-const newIssue = ref<{
-  title: string
-  description: string
-  latitude: number | null
-  longitude: number | null
-}>({
+const categories = ['ALL', 'Roads & Drainage', 'Streetlights & Power', 'Waste & Sanitation', 'Public Safety']
+const selectedCategory = ref('ALL')
+const areaFilter = ref('ALL')
+const searchQuery = ref('')
+const priorityFilter = ref('ALL')
+const statusFilter = ref('ALL')
+const sortBy = ref<'NEWEST' | 'MOST_CONFIRMED' | 'PRIORITY'>('NEWEST')
+
+const announcements = [
+  {
+    id: 1,
+    tag: 'HIGH',
+    date: 'Nov 2026',
+    title: 'Monsoon Drainage & Canal Clearing — Moratuwa',
+    summary: 'Field crews are inspecting low-lying roads and culverts across Katubedda, Molpe, and Soysapura.'
+  },
+  {
+    id: 2,
+    tag: 'MEDIUM',
+    date: 'Nov 2026',
+    title: 'LED Streetlight Maintenance Schedule',
+    summary: 'Faulty street lamps confirmed by residents are prioritized for evening repair batches.'
+  }
+]
+
+const newIssue = ref({
+  category: 'Roads & Drainage',
   title: '',
   description: '',
-  latitude: null,
-  longitude: null
+  latitude: null as number | null,
+  longitude: null as number | null
 })
+
+const formatPriority = (priority?: string) => {
+  if (!priority || priority.includes('ERROR')) return 'UNCLASSIFIED'
+  return priority.toUpperCase()
+}
+
+const priorityRank = (priority?: string) => {
+  const p = formatPriority(priority)
+  if (p === 'HIGH') return 3
+  if (p === 'MEDIUM') return 2
+  if (p === 'LOW') return 1
+  return 0
+}
+
+const getStatusStep = (status: string) => {
+  if (status === 'RESOLVED') return 3
+  if (status === 'IN_PROGRESS') return 2
+  return 1
+}
+
+const availableAreas = computed(() => {
+  const found = new Set<string>()
+  for (const issue of issues.value) {
+    const addr = addressMap.value[issue.id] || ''
+    if (addr.toLowerCase().includes('molpe')) found.add('Molpe')
+    if (addr.toLowerCase().includes('katubedda')) found.add('Katubedda')
+    if (addr.toLowerCase().includes('soysapura')) found.add('Soysapura')
+    if (addr.toLowerCase().includes('moratuwa')) found.add('Moratuwa')
+  }
+  return ['ALL', ...Array.from(found)]
+})
+
+const openIssueModal = (issue: Issue) => {
+  copiedGps.value = false
+  selectedIssue.value = issue
+}
+
+const copyCoordinates = async (issue: Issue) => {
+  const text = `${issue.latitude.toFixed(5)}, ${issue.longitude.toFixed(5)}`
+  try {
+    await navigator.clipboard.writeText(text)
+    copiedGps.value = true
+    setTimeout(() => {
+      copiedGps.value = false
+    }, 1800)
+  } catch {
+    copiedGps.value = false
+  }
+}
+
+const resolveAddresses = async (list: Issue[]) => {
+  for (const item of list) {
+    if (addressMap.value[item.id] || item.latitude == null || item.longitude == null) continue
+    try {
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?format=json&lat=${item.latitude}&lon=${item.longitude}`
+      )
+      const data = await res.json()
+      const parts = (data.display_name || '').split(',').map((s: string) => s.trim()).filter(Boolean)
+      addressMap.value[item.id] = parts.slice(0, 3).join(', ') || 'Moratuwa Area'
+    } catch {
+      addressMap.value[item.id] = 'Moratuwa Area'
+    }
+  }
+}
 
 const useMyLocation = () => {
   locationError.value = ''
-
   if (!navigator.geolocation) {
-    locationError.value = 'Geolocation is not supported by this browser.'
+    locationError.value = 'Geolocation is not supported in this browser.'
     return
   }
-
   isLocating.value = true
   navigator.geolocation.getCurrentPosition(
-    (position) => {
-      newIssue.value.latitude = position.coords.latitude
-      newIssue.value.longitude = position.coords.longitude
+    (pos) => {
+      newIssue.value.latitude = pos.coords.latitude
+      newIssue.value.longitude = pos.coords.longitude
       isLocating.value = false
     },
-    (error) => {
-      switch (error.code) {
-        case GeolocationPositionError.PERMISSION_DENIED:
-          locationError.value = 'Location permission was denied. Allow location access and try again.'
-          break
-        case GeolocationPositionError.POSITION_UNAVAILABLE:
-          locationError.value = 'Your location is currently unavailable. Please try again.'
-          break
-        case GeolocationPositionError.TIMEOUT:
-          locationError.value = 'The location request timed out. Please try again.'
-          break
-        default:
-          locationError.value = 'Unable to get your location. Please try again.'
-      }
+    () => {
+      locationError.value = 'Unable to retrieve GPS location.'
       isLocating.value = false
     },
-    { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+    { enableHighAccuracy: true }
   )
 }
 
 const handleImageSelection = (event: Event) => {
-  const input = event.currentTarget
-  if (!(input instanceof HTMLInputElement)) return
-
-  const image = input.files?.[0] ?? null
+  const input = event.currentTarget as HTMLInputElement
+  const file = input.files?.[0] ?? null
   imageError.value = ''
   selectedImage.value = null
 
-  if (image && image.size > MAX_IMAGE_SIZE_BYTES) {
-    imageError.value = 'Choose an image that is 5 MB or smaller.'
-    input.value = ''
+  if (file && file.size > MAX_IMAGE_SIZE_BYTES) {
+    imageError.value = 'Image must be under 5 MB.'
     return
   }
-  if (image?.type && !ALLOWED_IMAGE_TYPES.has(image.type)) {
-    imageError.value = 'Choose a JPEG, PNG, GIF, or WebP image.'
-    input.value = ''
-    return
-  }
-
-  selectedImage.value = image
+  selectedImage.value = file
 }
 
 const fetchIssues = async () => {
   try {
-    const response = await axios.get<Issue[]>(`${API_BASE_URL}/api/issues`)
-    issues.value = response.data.reverse()
-  } catch (error) {
-    console.error("Error fetching issues:", error)
+    const res = await axios.get<Issue[]>(`${API_BASE_URL}/api/issues`)
+    issues.value = res.data.slice().reverse()
+    resolveAddresses(issues.value)
+  } catch (err) {
+    console.error(err)
   } finally {
     loading.value = false
   }
 }
 
 const submitIssue = async () => {
-  const { latitude, longitude } = newIssue.value
-  if (latitude === null || longitude === null) return
-
+  if (newIssue.value.latitude === null || newIssue.value.longitude === null) return
   isSubmitting.value = true
   submitError.value = ''
   try {
-    const issuePayload = {
-      title: newIssue.value.title,
-      description: newIssue.value.description,
-      latitude,
-      longitude
-    }
+    const formattedTitle =
+      newIssue.value.category && !newIssue.value.title.startsWith('[')
+        ? `[${newIssue.value.category}] ${newIssue.value.title}`
+        : newIssue.value.title
 
-    if (selectedImage.value) {
-      const formData = new FormData()
-      Object.entries(issuePayload).forEach(([key, value]) => formData.append(key, value.toString()))
-      formData.append('image', selectedImage.value)
-      await axios.post(`${API_BASE_URL}/api/issues`, formData)
-    } else {
-      await axios.post(`${API_BASE_URL}/api/issues`, issuePayload)
+    const formData = new FormData()
+    formData.append('title', formattedTitle)
+    formData.append('description', newIssue.value.description)
+    formData.append('latitude', newIssue.value.latitude.toString())
+    formData.append('longitude', newIssue.value.longitude.toString())
+    if (selectedImage.value) formData.append('image', selectedImage.value)
+
+    await axios.post(`${API_BASE_URL}/api/issues`, formData)
+    newIssue.value = {
+      category: 'Roads & Drainage',
+      title: '',
+      description: '',
+      latitude: null,
+      longitude: null
     }
-    newIssue.value.title = ''
-    newIssue.value.description = ''
     selectedImage.value = null
-    imageError.value = ''
+    showReportModal.value = false
     if (imageInput.value) imageInput.value.value = ''
     await fetchIssues()
-  } catch (error) {
-    console.error("Error submitting issue:", error)
-    if (axios.isAxiosError(error) && error.response?.status === 413) {
-      submitError.value = 'The selected image exceeds the 5 MB upload limit.'
-    } else if (axios.isAxiosError(error) && error.response?.status === 400) {
-      submitError.value = 'The report or image was rejected. Check the selected file and required fields.'
-    } else if (axios.isAxiosError(error) && error.response?.status === 415) {
-      submitError.value = 'The backend rejected the upload format. Restart it to load the multipart upload endpoint.'
-    } else {
-      submitError.value = 'Unable to submit this report. Please try again.'
-    }
+  } catch {
+    submitError.value = 'Failed to submit report. Please try again.'
   } finally {
     isSubmitting.value = false
   }
 }
 
-onMounted(() => {
-  fetchIssues()
+const confirmIssue = async (id: number) => {
+  confirmingId.value = id
+  try {
+    await axios.post(`${API_BASE_URL}/api/issues/${id}/confirm`)
+    await fetchIssues()
+    if (selectedIssue.value?.id === id) {
+      const updated = issues.value.find(i => i.id === id)
+      if (updated) selectedIssue.value = updated
+    }
+  } catch (err) {
+    console.error('Failed to confirm issue:', err)
+  } finally {
+    confirmingId.value = null
+  }
+}
+
+const filteredIssues = computed(() => {
+  const list = issues.value.filter(issue => {
+    const titleLower = issue.title.toLowerCase()
+    const descLower = issue.description.toLowerCase()
+    const queryLower = searchQuery.value.toLowerCase()
+
+    const matchesSearch = titleLower.includes(queryLower) || descLower.includes(queryLower)
+    const matchesCategory =
+      selectedCategory.value === 'ALL' || titleLower.includes(selectedCategory.value.toLowerCase())
+    const matchesPriority =
+      priorityFilter.value === 'ALL' || formatPriority(issue.priority) === priorityFilter.value
+    const matchesStatus = statusFilter.value === 'ALL' || issue.status === statusFilter.value
+    const matchesArea =
+      areaFilter.value === 'ALL' ||
+      (addressMap.value[issue.id] || '').toLowerCase().includes(areaFilter.value.toLowerCase())
+
+    return matchesSearch && matchesCategory && matchesPriority && matchesStatus && matchesArea
+  })
+
+  if (sortBy.value === 'MOST_CONFIRMED') {
+    return list.slice().sort((a, b) => (b.reportCount || 1) - (a.reportCount || 1))
+  }
+  if (sortBy.value === 'PRIORITY') {
+    return list.slice().sort((a, b) => priorityRank(b.priority) - priorityRank(a.priority))
+  }
+  return list
 })
+
+watch(filteredIssues, (list) => resolveAddresses(list))
+onMounted(fetchIssues)
 </script>
 
 <template>
-  <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-    
-    <div class="md:col-span-1 bg-white p-6 rounded-lg shadow-sm border border-gray-200 h-fit">
-      <h2 class="text-xl font-bold text-gray-800 mb-4">Report an Issue</h2>
-      <form @submit.prevent="submitIssue" class="space-y-4">
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Title</label>
-          <input v-model="newIssue.title" type="text" required placeholder="e.g. Fallen Tree"
-                 class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
-        </div>
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Description</label>
-          <textarea v-model="newIssue.description" required rows="3" placeholder="Describe the problem..."
-                    class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"></textarea>
-        </div>
-        <div>
-          <label for="issue-image" class="block text-sm font-medium text-gray-700 mb-1">Photo (optional)</label>
-          <input
-            id="issue-image"
-            ref="imageInput"
-            type="file"
-            accept="image/jpeg,image/png,image/gif,image/webp"
-            :disabled="isSubmitting"
-            @change="handleImageSelection"
-            class="w-full text-sm text-gray-600 file:mr-3 file:rounded-md file:border-0 file:bg-blue-50 file:px-3 file:py-2 file:font-semibold file:text-blue-700 hover:file:bg-blue-100"
-          >
-          <p v-if="imageError" role="alert" class="mt-1 text-sm text-red-600">{{ imageError }}</p>
-          <p v-else-if="selectedImage" class="mt-1 text-sm text-gray-500">
-            {{ selectedImage.name }} · {{ (selectedImage.size / 1024 / 1024).toFixed(2) }} MB
-          </p>
-          <p v-else class="mt-1 text-xs text-gray-500">JPEG, PNG, GIF, or WebP; up to 5 MB.</p>
-        </div>
-        <div>
-          <button type="button" @click="useMyLocation" :disabled="isLocating"
-                  class="w-full border border-blue-600 text-blue-700 hover:bg-blue-50 font-semibold py-2 px-4 rounded-md transition-colors disabled:opacity-50">
-            {{ isLocating ? 'Getting Location...' : 'Use My Location' }}
-          </button>
-          <p v-if="locationError" role="alert" class="mt-2 text-sm text-red-600">{{ locationError }}</p>
-          <p v-else-if="newIssue.latitude !== null && newIssue.longitude !== null" role="status" class="mt-2 text-sm text-gray-500">
-            Location set: {{ newIssue.latitude }}, {{ newIssue.longitude }}
-          </p>
-          <p v-else class="mt-2 text-sm text-gray-500">Set your location before submitting the report.</p>
-        </div>
-        <button type="submit" :disabled="isSubmitting || isLocating || newIssue.latitude === null || newIssue.longitude === null"
-                class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md transition-colors disabled:opacity-50">
-          {{ isSubmitting ? 'Submitting...' : 'Submit Report' }}
-        </button>
-        <p v-if="submitError" role="alert" class="text-sm text-red-600">{{ submitError }}</p>
-      </form>
+  <div class="space-y-6">
+    <div class="bg-gradient-to-r from-blue-900 via-indigo-900 to-emerald-800 rounded-3xl p-8 md:p-10 text-white shadow-2xl flex flex-col md:flex-row justify-between items-start md:items-center relative overflow-hidden">
+      <div class="max-w-xl z-10">
+        <span class="px-3 py-1 bg-emerald-500/20 border border-emerald-400/30 text-emerald-300 rounded-full text-xs font-bold tracking-wide uppercase mb-3 inline-block">
+          Moratuwa Municipal Council
+        </span>
+        <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight mb-3">CivicConnect Smart Platform</h1>
+        <p class="text-blue-100 text-sm md:text-base leading-relaxed">
+          Report local infrastructure issues, confirm neighborhood hazards, and track AI-assisted priority triage in real time.
+        </p>
+      </div>
+      <button
+        type="button"
+        @click="showReportModal = true"
+        class="mt-6 md:mt-0 z-10 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold px-7 py-3.5 rounded-2xl shadow-xl transition-all transform hover:-translate-y-0.5 flex items-center space-x-2.5"
+      >
+        <span class="text-lg leading-none">+</span>
+        <span>Report an Issue</span>
+      </button>
     </div>
 
-    <div class="md:col-span-2 bg-white p-6 rounded-lg shadow-sm border border-gray-200">
-      <h2 class="text-2xl font-bold text-gray-800 mb-6">Live Issue Feed</h2>
-      
-      <div v-if="loading" class="text-gray-500 font-medium">Loading citizen reports...</div>
-      <div v-else-if="issues.length === 0" class="text-gray-500 font-medium">No issues reported yet.</div>
-      
-      <div v-else class="space-y-4">
-        <div v-for="issue in issues" :key="issue.id" class="p-4 border border-gray-100 rounded-md bg-gray-50 hover:shadow-md transition-shadow">
-          <div class="flex justify-between items-start mb-2">
-            <h3 class="text-lg font-semibold text-blue-700">{{ issue.title }}</h3>
-            <div class="space-x-2">
-              <span class="px-2 py-1 text-xs font-bold rounded-full"
-                    :class="issue.status === 'PENDING' ? 'bg-yellow-100 text-yellow-800' : 'bg-green-100 text-green-800'">
-                {{ issue.status }}
-              </span>
-              <!-- New Dynamic AI Priority Badge -->
-              <span class="px-2 py-1 text-xs font-bold rounded-full border"
-                    :class="{
-                      'bg-red-100 text-red-800 border-red-200': issue.priority === 'HIGH',
-                      'bg-orange-100 text-orange-800 border-orange-200': issue.priority === 'MEDIUM',
-                      'bg-blue-100 text-blue-800 border-blue-200': issue.priority === 'LOW',
-                      'bg-gray-100 text-gray-800 border-gray-200': issue.priority === 'UNCLASSIFIED'
-                    }">
-                {{ issue.priority }}
-              </span>
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+      <div class="lg:col-span-2 space-y-6">
+        <div class="bg-white p-5 rounded-2xl shadow-xs border border-gray-100 space-y-4">
+          <div class="grid grid-cols-1 md:grid-cols-5 gap-3">
+            <input
+              v-model="searchQuery"
+              type="text"
+              placeholder="Search reports..."
+              class="md:col-span-2 bg-gray-50 border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:bg-white focus:ring-2 focus:ring-blue-500 outline-none"
+            />
+            <select
+              v-model="priorityFilter"
+              class="bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 text-sm font-semibold text-gray-700 outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="ALL">All Priorities</option>
+              <option value="HIGH">High Priority</option>
+              <option value="MEDIUM">Medium Priority</option>
+              <option value="LOW">Low Priority</option>
+              <option value="UNCLASSIFIED">Unclassified</option>
+            </select>
+            <select
+              v-model="statusFilter"
+              class="bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 text-sm font-semibold text-gray-700 outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="ALL">All Statuses</option>
+              <option value="PENDING">Pending</option>
+              <option value="IN_PROGRESS">In Progress</option>
+              <option value="RESOLVED">Resolved</option>
+            </select>
+            <select
+              v-model="areaFilter"
+              class="bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 text-sm font-semibold text-gray-700 outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option v-for="area in availableAreas" :key="area" :value="area">
+                {{ area === 'ALL' ? 'All Areas' : area }}
+              </option>
+            </select>
+          </div>
+
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div class="flex flex-wrap gap-2">
+              <button
+                v-for="cat in categories"
+                :key="cat"
+                type="button"
+                @click="selectedCategory = cat"
+                class="px-3 py-1.5 rounded-xl text-xs font-bold transition-all border"
+                :class="selectedCategory === cat
+                  ? 'bg-blue-600 text-white border-blue-600'
+                  : 'bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100'"
+              >
+                {{ cat === 'ALL' ? 'All Categories' : cat }}
+              </button>
+            </div>
+
+            <div class="flex items-center gap-2 text-xs font-semibold text-gray-500">
+              <span>Sort:</span>
+              <select
+                v-model="sortBy"
+                class="bg-gray-50 border border-gray-200 rounded-xl px-3 py-1.5 text-xs font-bold text-gray-700 outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="NEWEST">Newest First</option>
+                <option value="MOST_CONFIRMED">Most Confirmed</option>
+                <option value="PRIORITY">Highest Priority</option>
+              </select>
             </div>
           </div>
-          <p class="text-gray-600 text-sm mb-3">{{ issue.description }}</p>
-          <img
-            v-if="issue.imageUrl"
-            :src="`${API_BASE_URL}${issue.imageUrl}`"
-            :alt="`Photo attached to ${issue.title}`"
-            loading="lazy"
-            class="mb-3 max-h-64 w-full rounded-md object-cover"
-          >
-          <p class="text-xs text-gray-400 font-mono">Location: {{ issue.latitude }}, {{ issue.longitude }}</p>
+        </div>
+
+        <div class="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
+          <div class="flex justify-between items-center mb-6 pb-4 border-b border-gray-100">
+            <div>
+              <h2 class="text-xl font-extrabold text-gray-900">Community Live Feed</h2>
+              <p class="text-xs text-gray-500 mt-0.5">Real-time geospatial issue tracking</p>
+            </div>
+            <span class="text-xs font-bold px-3.5 py-1.5 bg-blue-50 text-blue-700 rounded-full border border-blue-100">
+              {{ filteredIssues.length }} Reports Shown
+            </span>
+          </div>
+
+          <div v-if="loading" class="text-gray-400 py-12 text-center font-medium animate-pulse">
+            Syncing municipal database...
+          </div>
+          <div v-else-if="filteredIssues.length === 0" class="text-gray-400 py-12 text-center font-medium">
+            No reports match your current filters.
+          </div>
+
+          <div v-else class="space-y-5">
+            <div
+              v-for="issue in filteredIssues"
+              :key="issue.id"
+              class="p-6 border border-gray-100 rounded-2xl bg-gradient-to-br from-white to-gray-50/50 hover:shadow-md transition-all"
+            >
+              <div class="flex justify-between items-start mb-3 gap-3 flex-wrap">
+                <div>
+                  <button
+                    type="button"
+                    @click="openIssueModal(issue)"
+                    class="text-lg font-bold text-gray-900 hover:text-blue-700 text-left transition-colors"
+                  >
+                    {{ issue.title }}
+                  </button>
+                  <div class="text-xs text-gray-500 mt-1">
+                    <span class="font-semibold text-gray-700">{{ addressMap[issue.id] || 'Moratuwa Area' }}</span>
+                    <span class="mx-1.5 text-gray-300">·</span>
+                    <span class="font-mono text-gray-400">{{ issue.latitude.toFixed(4) }}, {{ issue.longitude.toFixed(4) }}</span>
+                  </div>
+                </div>
+
+                <div class="flex items-center space-x-2 flex-wrap gap-y-1">
+                  <span class="px-2.5 py-1 text-xs font-extrabold rounded-xl bg-indigo-50 text-indigo-700 border border-indigo-200">
+                    {{ issue.reportCount || 1 }} Report(s)
+                  </span>
+                  <span
+                    class="px-2.5 py-1 text-xs font-bold rounded-xl border"
+                    :class="{
+                      'bg-rose-50 text-rose-700 border-rose-200': formatPriority(issue.priority) === 'HIGH',
+                      'bg-amber-50 text-amber-700 border-amber-200': formatPriority(issue.priority) === 'MEDIUM',
+                      'bg-blue-50 text-blue-700 border-blue-200': formatPriority(issue.priority) === 'LOW',
+                      'bg-gray-100 text-gray-700 border-gray-200': formatPriority(issue.priority) === 'UNCLASSIFIED'
+                    }"
+                  >
+                    AI: {{ formatPriority(issue.priority) }}
+                  </span>
+                  <span
+                    class="px-2.5 py-1 text-xs font-bold rounded-xl"
+                    :class="{
+                      'bg-amber-100 text-amber-800': issue.status === 'PENDING',
+                      'bg-blue-100 text-blue-800': issue.status === 'IN_PROGRESS',
+                      'bg-emerald-100 text-emerald-800': issue.status === 'RESOLVED'
+                    }"
+                  >
+                    {{ issue.status }}
+                  </span>
+                </div>
+              </div>
+
+              <p class="text-gray-600 text-sm mb-4 leading-relaxed">{{ issue.description }}</p>
+
+              <img
+                v-if="issue.imageUrl"
+                :src="`${API_BASE_URL}${issue.imageUrl}`"
+                class="h-60 w-full rounded-xl object-cover border border-gray-200 mb-4"
+              />
+
+              <div class="mb-4 space-y-1.5">
+                <div class="flex items-center justify-between text-[11px] font-semibold text-gray-500">
+                  <span>
+                    Stage:
+                    <strong class="text-gray-800">
+                      {{ issue.status === 'RESOLVED' ? 'Resolved' : issue.status === 'IN_PROGRESS' ? 'In Progress' : 'Pending Review' }}
+                    </strong>
+                  </span>
+                  <span v-if="(issue.reportCount || 1) < 3 && issue.status === 'PENDING'" class="text-indigo-600">
+                    {{ 3 - (issue.reportCount || 1) }} more confirmation(s) for auto-HIGH boost
+                  </span>
+                  <span v-else-if="(issue.reportCount || 1) >= 3" class="text-rose-600 font-bold">
+                    Escalated by community confirmations
+                  </span>
+                </div>
+                <div class="grid grid-cols-3 gap-1.5 h-1.5">
+                  <div class="rounded-full bg-amber-400"></div>
+                  <div class="rounded-full" :class="getStatusStep(issue.status) >= 2 ? 'bg-blue-500' : 'bg-gray-200'"></div>
+                  <div class="rounded-full" :class="getStatusStep(issue.status) >= 3 ? 'bg-emerald-500' : 'bg-gray-200'"></div>
+                </div>
+              </div>
+
+              <div class="flex items-center justify-between pt-3 border-t border-gray-100 gap-2 flex-wrap">
+                <div class="flex items-center gap-3 text-xs text-gray-400">
+                  <span>Report #{{ issue.id }}</span>
+                  <button
+                    type="button"
+                    @click="openIssueModal(issue)"
+                    class="text-blue-600 hover:text-blue-800 font-semibold"
+                  >
+                    View Details
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  :disabled="confirmingId === issue.id"
+                  @click="confirmIssue(issue.id)"
+                  class="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 transition-all disabled:opacity-50"
+                >
+                  {{ confirmingId === issue.id ? 'Confirming...' : '+ Confirm / Me Too' }}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="lg:col-span-1 space-y-6">
+        <div class="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 space-y-5">
+          <h3 class="text-lg font-bold text-gray-900">Platform Analytics</h3>
+          <div class="grid grid-cols-2 gap-3">
+            <div class="p-4 bg-blue-50 rounded-2xl border border-blue-100 text-center">
+              <span class="block text-2xl font-extrabold text-blue-700">{{ issues.length }}</span>
+              <span class="text-xs font-semibold text-blue-600 uppercase tracking-wide">Total Reports</span>
+            </div>
+            <div class="p-4 bg-emerald-50 rounded-2xl border border-emerald-100 text-center">
+              <span class="block text-2xl font-extrabold text-emerald-700">
+                {{ issues.filter(i => i.status === 'RESOLVED').length }}
+              </span>
+              <span class="text-xs font-semibold text-emerald-600 uppercase tracking-wide">Resolved</span>
+            </div>
+          </div>
+
+          <div class="space-y-3 pt-1">
+            <div class="p-4 bg-gray-50 rounded-2xl border border-gray-100 text-sm text-gray-700">
+              <span class="font-bold block mb-1 text-gray-900">AI Triage & Crowdsourcing</span>
+              Reports confirmed by 3+ residents automatically escalate to HIGH priority so urgent issues get attention first.
+            </div>
+            <div class="p-4 bg-gray-50 rounded-2xl border border-gray-100 text-sm text-gray-700">
+              <span class="font-bold block mb-1 text-gray-900">PostGIS Spatial Clustering</span>
+              Nearby reports within 50 meters are grouped cleanly to keep the Moratuwa map readable.
+            </div>
+          </div>
+        </div>
+
+        <div class="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 space-y-4">
+          <div class="flex items-center justify-between">
+            <h3 class="text-lg font-bold text-gray-900">City Announcements</h3>
+            <span class="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
+              Notices
+            </span>
+          </div>
+
+          <div class="space-y-3">
+            <div
+              v-for="item in announcements"
+              :key="item.id"
+              class="p-4 rounded-2xl border border-gray-100 bg-gray-50/70 space-y-1.5"
+            >
+              <div class="flex items-center justify-between text-[11px] font-bold">
+                <span class="px-2 py-0.5 rounded-md bg-blue-100 text-blue-800">{{ item.tag }}</span>
+                <span class="text-gray-400">{{ item.date }}</span>
+              </div>
+              <div class="text-sm font-bold text-gray-900">{{ item.title }}</div>
+              <p class="text-xs text-gray-600 leading-relaxed">{{ item.summary }}</p>
+            </div>
+          </div>
         </div>
       </div>
     </div>
 
+    <div
+      v-if="selectedIssue"
+      class="fixed inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center z-50 p-4"
+      @click.self="selectedIssue = null"
+    >
+      <div class="bg-white rounded-3xl max-w-xl w-full p-7 shadow-2xl border border-gray-100 space-y-4">
+        <div class="flex justify-between items-start gap-4">
+          <div>
+            <span class="text-xs font-bold uppercase px-2.5 py-1 rounded-lg bg-blue-50 text-blue-700">
+              {{ selectedIssue.status }} · AI: {{ formatPriority(selectedIssue.priority) }}
+            </span>
+            <h2 class="text-2xl font-extrabold text-gray-900 mt-2">{{ selectedIssue.title }}</h2>
+            <p class="text-xs text-gray-500 mt-0.5">
+              {{ addressMap[selectedIssue.id] || 'Moratuwa Area' }} · Report #{{ selectedIssue.id }}
+            </p>
+          </div>
+          <button
+            type="button"
+            @click="selectedIssue = null"
+            class="w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-600 font-bold flex items-center justify-center"
+          >
+            &times;
+          </button>
+        </div>
+
+        <img
+          v-if="selectedIssue.imageUrl"
+          :src="`${API_BASE_URL}${selectedIssue.imageUrl}`"
+          class="h-64 w-full rounded-2xl object-cover border border-gray-200"
+        />
+
+        <p class="text-gray-700 text-sm leading-relaxed">{{ selectedIssue.description }}</p>
+
+        <div class="bg-gray-50 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-2 text-xs font-mono text-gray-600">
+          <span>{{ selectedIssue.latitude.toFixed(5) }}, {{ selectedIssue.longitude.toFixed(5) }}</span>
+          <div class="flex items-center gap-3 font-sans">
+            <span class="font-bold text-indigo-700">{{ selectedIssue.reportCount || 1 }} Report(s)</span>
+            <button
+              type="button"
+              @click="copyCoordinates(selectedIssue)"
+              class="px-2.5 py-1 rounded-lg bg-white border border-gray-200 hover:bg-gray-100 text-gray-700 font-semibold"
+            >
+              {{ copiedGps ? 'Copied!' : 'Copy GPS' }}
+            </button>
+          </div>
+        </div>
+
+        <div class="flex items-center justify-between pt-2 gap-3">
+          <button
+            type="button"
+            :disabled="confirmingId === selectedIssue.id"
+            @click="confirmIssue(selectedIssue.id)"
+            class="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-sm disabled:opacity-50"
+          >
+            {{ confirmingId === selectedIssue.id ? 'Confirming...' : '+ Confirm / Me Too' }}
+          </button>
+          <button
+            type="button"
+            @click="selectedIssue = null"
+            class="bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold px-5 py-2.5 rounded-xl text-sm"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="showReportModal" class="fixed inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+      <div class="bg-white rounded-3xl max-w-lg w-full p-8 shadow-2xl border border-gray-100">
+        <div class="flex justify-between items-center mb-6">
+          <div>
+            <h2 class="text-xl font-extrabold text-gray-900">Report Municipal Issue</h2>
+            <p class="text-xs text-gray-500">Provide details for AI triage & PostGIS mapping</p>
+          </div>
+          <button
+            type="button"
+            @click="showReportModal = false"
+            class="w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-500 font-bold flex items-center justify-center"
+          >
+            &times;
+          </button>
+        </div>
+
+        <form @submit.prevent="submitIssue" class="space-y-4">
+          <div>
+            <label class="block text-xs font-bold text-gray-700 uppercase mb-1">Category</label>
+            <select
+              v-model="newIssue.category"
+              class="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-sm focus:bg-white focus:ring-2 focus:ring-blue-500 outline-none"
+            >
+              <option v-for="cat in categories.filter(c => c !== 'ALL')" :key="cat" :value="cat">
+                {{ cat }}
+              </option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-700 uppercase mb-1">Issue Title</label>
+            <input
+              v-model="newIssue.title"
+              type="text"
+              required
+              placeholder="e.g. Fallen Tree on Main Road"
+              class="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-sm focus:bg-white focus:ring-2 focus:ring-blue-500 outline-none"
+            />
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-700 uppercase mb-1">Description</label>
+            <textarea
+              v-model="newIssue.description"
+              required
+              rows="3"
+              placeholder="Describe the hazard and impact..."
+              class="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-sm focus:bg-white focus:ring-2 focus:ring-blue-500 outline-none"
+            ></textarea>
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-700 uppercase mb-1">Photo Evidence (Optional)</label>
+            <input
+              ref="imageInput"
+              type="file"
+              accept="image/*"
+              @change="handleImageSelection"
+              class="w-full text-xs text-gray-500 file:mr-4 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+            />
+            <p v-if="imageError" class="text-xs text-rose-600 mt-1">{{ imageError }}</p>
+          </div>
+          <div>
+            <button
+              type="button"
+              @click="useMyLocation"
+              :disabled="isLocating"
+              class="w-full border-2 border-dashed border-blue-300 bg-blue-50/50 hover:bg-blue-50 text-blue-700 font-bold py-3 rounded-xl transition-all text-sm"
+            >
+              {{ isLocating ? 'Detecting GPS...' : 'Detect My Current Location' }}
+            </button>
+            <p v-if="newIssue.latitude" class="text-xs text-emerald-600 mt-2 font-mono text-center font-bold">
+              Location locked: {{ newIssue.latitude.toFixed(4) }}, {{ newIssue.longitude?.toFixed(4) }}
+            </p>
+            <p v-if="locationError" class="text-xs text-rose-600 mt-1 text-center">{{ locationError }}</p>
+          </div>
+
+          <div class="flex space-x-3 pt-4">
+            <button
+              type="button"
+              @click="showReportModal = false"
+              class="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold py-3 rounded-xl text-sm"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              :disabled="isSubmitting || newIssue.latitude === null"
+              class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl text-sm disabled:opacity-50 shadow-md"
+            >
+              {{ isSubmitting ? 'Analyzing & Saving...' : 'Submit Report' }}
+            </button>
+          </div>
+          <p v-if="submitError" class="text-xs text-rose-600 text-center">{{ submitError }}</p>
+        </form>
+      </div>
+    </div>
   </div>
 </template>

@@ -14,6 +14,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.List;
 import java.util.Optional;
 
 import com.civicconnect.backend.model.Issue;
@@ -68,6 +69,25 @@ class IssueControllerSecurityTests {
 
         mockMvc.perform(get("/api/issues"))
                 .andExpect(status().isOk());
+    }
+
+    @Test
+    void publicIssueFeedReturnsCoordinatesInsteadOfSerializingGeometry() throws Exception {
+        Issue issue = new Issue();
+        issue.setId(3L);
+        issue.setTitle("Broken streetlight");
+        issue.setDescription("The light is not working.");
+        issue.setStatus("PENDING");
+        issue.setPriority("MEDIUM");
+        issue.setLocation(new GeometryFactory(new PrecisionModel(), 4326)
+                .createPoint(new Coordinate(79.9, 6.8)));
+        when(issueRepository.findAll()).thenReturn(List.of(issue));
+
+        mockMvc.perform(get("/api/issues"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].latitude").value(6.8))
+                .andExpect(jsonPath("$[0].longitude").value(79.9))
+                .andExpect(jsonPath("$[0].location").doesNotExist());
     }
 
     @Test
