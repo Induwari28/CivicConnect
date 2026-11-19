@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, shallowRef } from 'vue'
 import { useRouter } from 'vue-router'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
@@ -9,9 +9,9 @@ import type { Issue } from '@/types/issue'
 const router = useRouter()
 const API_BASE_URL = 'http://localhost:8081'
 
-const map = ref<L.Map | null>(null)
-const markerLayer = ref<L.LayerGroup | null>(null)
-const clickMarker = ref<L.CircleMarker | null>(null)
+const map = shallowRef<L.Map | null>(null)
+const markerLayer = shallowRef<L.LayerGroup | null>(null)
+const clickMarker = shallowRef<L.CircleMarker | null>(null)
 
 const issues = ref<Issue[]>([])
 const selectedIssue = ref<Issue | null>(null)
@@ -73,8 +73,10 @@ const resolveAddress = async (lat: number, lon: number): Promise<string> => {
 }
 
 const renderMarkers = () => {
-  if (!map.value || !markerLayer.value) return
-  markerLayer.value.clearLayers()
+  const currentMap = map.value
+  const currentGroup = markerLayer.value
+  if (!currentMap || !currentGroup) return
+  currentGroup.clearLayers()
 
   filteredIssues.value.forEach(issue => {
     const color = getMarkerColor(issue)
@@ -97,8 +99,8 @@ const renderMarkers = () => {
     marker.on('click', async () => {
       selectedIssue.value = issue
       clickedCoord.value = null
-      if (clickMarker.value && map.value) {
-        map.value.removeLayer(clickMarker.value)
+      if (clickMarker.value) {
+        currentMap.removeLayer(clickMarker.value)
         clickMarker.value = null
       }
       if (!addressMap.value[issue.id]) {
@@ -106,7 +108,7 @@ const renderMarkers = () => {
       }
     })
 
-    marker.addTo(markerLayer.value!)
+    marker.addTo(currentGroup)
 
     if (showRadiusCircles.value && (count > 1 || formatPriority(issue.priority) === 'HIGH')) {
       L.circle([issue.latitude, issue.longitude], {
@@ -116,7 +118,7 @@ const renderMarkers = () => {
         fillOpacity: 0.12,
         weight: 1.5,
         dashArray: '4 4'
-      }).addTo(markerLayer.value!)
+      }).addTo(currentGroup)
     }
   })
 }
@@ -140,7 +142,7 @@ const confirmSelectedIssue = async (id: number) => {
 const navigateToReportAtLocation = () => {
   if (!clickedCoord.value) return
   router.push({
-    path: '/',
+    path: '/feed',
     query: {
       lat: clickedCoord.value.lat.toFixed(5),
       lng: clickedCoord.value.lng.toFixed(5)
@@ -151,31 +153,34 @@ const navigateToReportAtLocation = () => {
 watch([filteredIssues, showRadiusCircles], renderMarkers)
 
 onMounted(async () => {
-  map.value = L.map('map', { zoomControl: true }).setView([6.7950, 79.9000], 14)
+  const createdMap = L.map('map', { zoomControl: true }).setView([6.7950, 79.9000], 14)
+  map.value = createdMap
 
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
     attribution: '&copy; OpenStreetMap contributors'
-  }).addTo(map.value)
+  }).addTo(createdMap)
 
-  markerLayer.value = L.layerGroup().addTo(map.value)
+  const group = L.layerGroup().addTo(createdMap)
+  markerLayer.value = group
 
-  map.value.on('click', async (e: L.LeafletMouseEvent) => {
+  createdMap.on('click', async (e: L.LeafletMouseEvent) => {
     const { lat, lng } = e.latlng
     selectedIssue.value = null
 
-    if (clickMarker.value && map.value) {
-      map.value.removeLayer(clickMarker.value)
+    if (clickMarker.value) {
+      createdMap.removeLayer(clickMarker.value)
     }
 
-    clickMarker.value = L.circleMarker([lat, lng], {
+    const pin = L.circleMarker([lat, lng], {
       radius: 8,
       fillColor: '#10b981',
       color: '#ffffff',
       weight: 2,
       opacity: 1,
       fillOpacity: 0.9
-    }).addTo(map.value)
+    }).addTo(createdMap)
+    clickMarker.value = pin
 
     clickedCoord.value = {
       lat,
@@ -183,7 +188,10 @@ onMounted(async () => {
       address: 'Resolving address...'
     }
 
-    clickedCoord.value.address = await resolveAddress(lat, lng)
+    const resolved = await resolveAddress(lat, lng)
+    if (clickedCoord.value) {
+      clickedCoord.value.address = resolved
+    }
   })
 
   try {

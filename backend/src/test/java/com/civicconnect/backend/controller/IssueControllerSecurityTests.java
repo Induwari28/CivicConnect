@@ -8,8 +8,8 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.options;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.nio.charset.StandardCharsets;
@@ -26,16 +26,16 @@ import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.GeometryFactory;
 import org.locationtech.jts.geom.Point;
 import org.locationtech.jts.geom.PrecisionModel;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.web.multipart.MultipartFile;
-import org.springframework.mock.web.MockMultipartFile;
 
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -121,6 +121,27 @@ class IssueControllerSecurityTests {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id").value(7))
                 .andExpect(jsonPath("$.status").value("IN_PROGRESS"));
+    }
+
+    @Test
+    void publicConfirmIncrementsReportCount() throws Exception {
+        Issue issue = new Issue();
+        issue.setId(7L);
+        issue.setTitle("Broken streetlight");
+        issue.setDescription("The light is not working.");
+        issue.setStatus("PENDING");
+        issue.setPriority("LOW");
+        issue.setReportCount(1);
+        issue.setLocation(new GeometryFactory(new PrecisionModel(), 4326)
+                .createPoint(new Coordinate(79.9, 6.8)));
+
+        when(issueRepository.findById(7L)).thenReturn(Optional.of(issue));
+        when(issueRepository.save(any(Issue.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        mockMvc.perform(post("/api/issues/7/confirm"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(7))
+                .andExpect(jsonPath("$.reportCount").value(2));
     }
 
     @Test

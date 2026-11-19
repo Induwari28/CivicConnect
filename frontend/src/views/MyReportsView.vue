@@ -176,7 +176,7 @@ onMounted(fetchTrackedIssues)
         <!-- Progress Step Indicator -->
         <div class="pt-2">
           <div class="flex justify-between text-[11px] font-semibold text-gray-500 mb-1.5">
-            <span :class="issue.status !== '' ? 'text-blue-700 font-bold' : ''">1. Reported</span>
+            <span class="text-blue-700 font-bold">1. Reported</span>
             <span :class="issue.status === 'IN_PROGRESS' || issue.status === 'RESOLVED' ? 'text-blue-700 font-bold' : ''">2. Crew Dispatched</span>
             <span :class="issue.status === 'RESOLVED' ? 'text-emerald-700 font-bold' : ''">3. Resolved</span>
           </div>
