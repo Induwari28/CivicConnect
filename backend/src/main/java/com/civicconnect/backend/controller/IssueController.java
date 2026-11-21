@@ -104,18 +104,18 @@ public class IssueController {
     }
 
     @PostMapping("/{id}/confirm")
-public IssueResponse confirmIssue(@PathVariable Long id) {
-    Issue issue = issueRepository.findById(id)
-            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Issue not found."));
+    public IssueResponse confirmIssue(@PathVariable Long id) {
+        Issue issue = issueRepository.findById(id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Issue not found."));
 
-    issue.incrementReportCount();
+        issue.incrementReportCount();
 
-    if (issue.getReportCount() >= 3 && !"HIGH".equalsIgnoreCase(issue.getPriority())) {
-        issue.setPriority("HIGH");
+        if (issue.getReportCount() >= 3 && !"HIGH".equalsIgnoreCase(issue.getPriority())) {
+            issue.setPriority("HIGH");
+        }
+
+        return toResponse(issueRepository.save(issue));
     }
-
-    return toResponse(issueRepository.save(issue));
-}
 
     @PatchMapping("/{id}/status")
     public IssueResponse updateStatus(@PathVariable Long id, @RequestBody StatusUpdateRequest request) {
@@ -167,6 +167,7 @@ public IssueResponse confirmIssue(@PathVariable Long id) {
         return toResponse(issueRepository.save(issue));
     }
 
+    @Transactional
     private IssueResponse processAndSaveIssue(
             String title,
             String description,
@@ -176,33 +177,43 @@ public IssueResponse confirmIssue(@PathVariable Long id) {
 
         validateIssueData(title, description, latitude, longitude);
 
-        // 1. Check for spatial duplicate within 50 meters
-        Optional<Issue> existingDuplicate;
+        // 1. Check for an active spatial cluster within 50 meters
+        Optional<Issue> existingCluster;
         try {
-            existingDuplicate = issueRepository.findNearbyDuplicate(latitude, longitude, title);
+            existingCluster = issueRepository.findNearbyDuplicate(latitude, longitude);
         } catch (DataAccessException exception) {
-            LOGGER.error("Failed to query for nearby duplicate issues.", exception);
+            LOGGER.error("Failed to query for nearby clustered issues within 50m.", exception);
             throw exception;
         }
 
-        if (existingDuplicate.isPresent()) {
-            Issue duplicate = existingDuplicate.get();
-            duplicate.incrementReportCount();
-            
+        if (existingCluster.isPresent()) {
+            Issue clusteredIssue = existingCluster.get();
+            clusteredIssue.incrementReportCount();
+
+            if (description != null && !description.isBlank()) {
+                String currentDesc = clusteredIssue.getDescription() != null ? clusteredIssue.getDescription() : "";
+                if (!currentDesc.contains(description.trim())) {
+                    clusteredIssue.setDescription(
+                            currentDesc.isBlank()
+                                    ? description.trim()
+                                    : currentDesc + " | Additional report: " + description.trim());
+                }
+            }
+
             // Smart Crowdsourcing Boost: 3+ reports automatically escalates priority to HIGH
-            if (duplicate.getReportCount() >= 3 && !"HIGH".equalsIgnoreCase(duplicate.getPriority())) {
-                duplicate.setPriority("HIGH");
+            if (clusteredIssue.getReportCount() >= 3 && !"HIGH".equalsIgnoreCase(clusteredIssue.getPriority())) {
+                clusteredIssue.setPriority("HIGH");
             }
 
             try {
-                return toResponse(issueRepository.save(duplicate));
+                return toResponse(issueRepository.save(clusteredIssue));
             } catch (DataAccessException exception) {
-                LOGGER.error("Failed to save updated duplicate issue.", exception);
+                LOGGER.error("Failed to save updated 50m clustered issue.", exception);
                 throw exception;
             }
         }
 
-        // 2. Otherwise, create a brand-new issue
+        // 2. Otherwise, create a brand-new issue node
         Issue issue = new Issue();
         issue.setTitle(title);
         issue.setDescription(description);

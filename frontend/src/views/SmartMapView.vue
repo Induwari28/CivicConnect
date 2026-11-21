@@ -9,15 +9,26 @@ import type { Issue } from '@/types/issue'
 const router = useRouter()
 const API_BASE_URL = 'http://localhost:8081'
 
+interface SpatialCluster {
+  id: string
+  centerLat: number
+  centerLng: number
+  issues: Issue[]
+  totalReports: number
+  topPriority: 'HIGH' | 'MEDIUM' | 'LOW' | 'UNCLASSIFIED'
+}
+
 const map = shallowRef<L.Map | null>(null)
 const markerLayer = shallowRef<L.LayerGroup | null>(null)
 const clickMarker = shallowRef<L.CircleMarker | null>(null)
 
 const issues = ref<Issue[]>([])
 const selectedIssue = ref<Issue | null>(null)
+const selectedCluster = ref<SpatialCluster | null>(null)
 const priorityFilter = ref('ALL')
 const statusFilter = ref('ALL')
 const showRadiusCircles = ref(true)
+const currentZoom = ref(14)
 const addressMap = ref<Record<number, string>>({})
 const confirmingId = ref<number | null>(null)
 const clickedCoord = ref<{ lat: number; lng: number; address: string } | null>(null)
@@ -29,13 +40,32 @@ const zones = [
   { name: 'Soysapura', coords: [6.8120, 79.8870] as [number, number], zoom: 15 }
 ]
 
-const formatPriority = (priority?: string) => {
+const formatPriority = (priority?: string): 'HIGH' | 'MEDIUM' | 'LOW' | 'UNCLASSIFIED' => {
   if (!priority || priority.includes('ERROR')) return 'UNCLASSIFIED'
-  return priority.toUpperCase()
+  const upper = priority.toUpperCase()
+  if (upper === 'HIGH' || upper === 'MEDIUM' || upper === 'LOW') return upper
+  return 'UNCLASSIFIED'
 }
 
-const getMarkerColor = (issue: Issue) => {
-  const p = formatPriority(issue.priority)
+const priorityWeight = (p: 'HIGH' | 'MEDIUM' | 'LOW' | 'UNCLASSIFIED') => {
+  if (p === 'HIGH') return 3
+  if (p === 'MEDIUM') return 2
+  if (p === 'LOW') return 1
+  return 0
+}
+
+const distanceMeters = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+  const toRad = (deg: number) => (deg * Math.PI) / 180
+  const r = 6371000
+  const dLat = toRad(lat2 - lat1)
+  const dLon = toRad(lon2 - lon1)
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2
+  return 2 * r * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+}
+
+const getColorByPriority = (p: string) => {
   if (p === 'HIGH') return '#e11d48'
   if (p === 'MEDIUM') return '#d97706'
   if (p === 'LOW') return '#2563eb'
@@ -49,6 +79,44 @@ const filteredIssues = computed(() => {
     const matchesStatus = statusFilter.value === 'ALL' || issue.status === statusFilter.value
     return matchesPriority && matchesStatus && issue.latitude != null && issue.longitude != null
   })
+})
+
+const spatialClusters = computed<SpatialCluster[]>(() => {
+  const clusters: SpatialCluster[] = []
+  const radiusThreshold = currentZoom.value < 16 ? 120 : 50
+
+  for (const issue of filteredIssues.value) {
+    let targetCluster = clusters.find(
+      c => distanceMeters(c.centerLat, c.centerLng, issue.latitude, issue.longitude) <= radiusThreshold
+    )
+
+    if (!targetCluster) {
+      targetCluster = {
+        id: `cluster-${issue.id}`,
+        centerLat: issue.latitude,
+        centerLng: issue.longitude,
+        issues: [],
+        totalReports: 0,
+        topPriority: 'UNCLASSIFIED'
+      }
+      clusters.push(targetCluster)
+    }
+
+    targetCluster.issues.push(issue)
+    targetCluster.totalReports += issue.reportCount || 1
+    const issuePriority = formatPriority(issue.priority)
+    if (priorityWeight(issuePriority) > priorityWeight(targetCluster.topPriority)) {
+      targetCluster.topPriority = issuePriority
+    }
+
+    const count = targetCluster.issues.length
+    targetCluster.centerLat =
+      targetCluster.issues.reduce((sum, item) => sum + item.latitude, 0) / count
+    targetCluster.centerLng =
+      targetCluster.issues.reduce((sum, item) => sum + item.longitude, 0) / count
+  }
+
+  return clusters
 })
 
 const flyToZone = (coords: [number, number], zoom: number) => {
@@ -72,46 +140,74 @@ const resolveAddress = async (lat: number, lon: number): Promise<string> => {
   }
 }
 
+const selectIssueDetail = async (issue: Issue) => {
+  selectedIssue.value = issue
+  selectedCluster.value = null
+  clickedCoord.value = null
+  if (clickMarker.value && map.value) {
+    map.value.removeLayer(clickMarker.value)
+    clickMarker.value = null
+  }
+  if (!addressMap.value[issue.id]) {
+    addressMap.value[issue.id] = await resolveAddress(issue.latitude, issue.longitude)
+  }
+}
+
 const renderMarkers = () => {
   const currentMap = map.value
   const currentGroup = markerLayer.value
   if (!currentMap || !currentGroup) return
   currentGroup.clearLayers()
 
-  filteredIssues.value.forEach(issue => {
-    const color = getMarkerColor(issue)
-    const count = issue.reportCount || 1
+  for (const cluster of spatialClusters.value) {
+    const color = getColorByPriority(cluster.topPriority)
+    const isMulti = cluster.issues.length > 1 || cluster.totalReports > 1
 
-    const marker = L.circleMarker([issue.latitude, issue.longitude], {
-      radius: count > 1 ? 12 : 9,
-      fillColor: color,
-      color: '#ffffff',
-      weight: 2.5,
-      opacity: 1,
-      fillOpacity: 0.95
-    })
+    if (isMulti && currentZoom.value < 16) {
+      const icon = L.divIcon({
+        className: 'custom-cluster-pin',
+        html: `<div style="background:${color};color:#fff;border:2.5px solid #fff;border-radius:9999px;width:34px;height:34px;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:12px;box-shadow:0 4px 10px rgba(0,0,0,0.22);">${cluster.totalReports}</div>`,
+        iconSize: [34, 34],
+        iconAnchor: [17, 17]
+      })
 
-    marker.bindTooltip(
-      `${issue.title} (${formatPriority(issue.priority)}, ${count} report(s))`,
-      { direction: 'top', offset: [0, -8] }
-    )
+      const clusterMarker = L.marker([cluster.centerLat, cluster.centerLng], { icon })
+      clusterMarker.bindTooltip(
+        `${cluster.totalReports} report(s) grouped within 50m — click to inspect or zoom in`,
+        { direction: 'top', offset: [0, -10] }
+      )
+      clusterMarker.on('click', () => {
+        selectedIssue.value = null
+        selectedCluster.value = cluster
+        clickedCoord.value = null
+      })
+      clusterMarker.addTo(currentGroup)
+    } else {
+      for (const issue of cluster.issues) {
+        const issueColor = getColorByPriority(formatPriority(issue.priority))
+        const count = issue.reportCount || 1
 
-    marker.on('click', async () => {
-      selectedIssue.value = issue
-      clickedCoord.value = null
-      if (clickMarker.value) {
-        currentMap.removeLayer(clickMarker.value)
-        clickMarker.value = null
+        const marker = L.circleMarker([issue.latitude, issue.longitude], {
+          radius: count > 1 ? 12 : 9,
+          fillColor: issueColor,
+          color: '#ffffff',
+          weight: 2.5,
+          opacity: 1,
+          fillOpacity: 0.95
+        })
+
+        marker.bindTooltip(
+          `${issue.title} (${formatPriority(issue.priority)}, ${count} report(s))`,
+          { direction: 'top', offset: [0, -8] }
+        )
+
+        marker.on('click', () => selectIssueDetail(issue))
+        marker.addTo(currentGroup)
       }
-      if (!addressMap.value[issue.id]) {
-        addressMap.value[issue.id] = await resolveAddress(issue.latitude, issue.longitude)
-      }
-    })
+    }
 
-    marker.addTo(currentGroup)
-
-    if (showRadiusCircles.value && (count > 1 || formatPriority(issue.priority) === 'HIGH')) {
-      L.circle([issue.latitude, issue.longitude], {
+    if (showRadiusCircles.value && (isMulti || cluster.topPriority === 'HIGH')) {
+      L.circle([cluster.centerLat, cluster.centerLng], {
         radius: 50,
         color,
         fillColor: color,
@@ -120,7 +216,7 @@ const renderMarkers = () => {
         dashArray: '4 4'
       }).addTo(currentGroup)
     }
-  })
+  }
 }
 
 const confirmSelectedIssue = async (id: number) => {
@@ -150,11 +246,12 @@ const navigateToReportAtLocation = () => {
   })
 }
 
-watch([filteredIssues, showRadiusCircles], renderMarkers)
+watch([filteredIssues, showRadiusCircles, currentZoom], renderMarkers)
 
 onMounted(async () => {
   const createdMap = L.map('map', { zoomControl: true }).setView([6.7950, 79.9000], 14)
   map.value = createdMap
+  currentZoom.value = createdMap.getZoom()
 
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
@@ -164,9 +261,14 @@ onMounted(async () => {
   const group = L.layerGroup().addTo(createdMap)
   markerLayer.value = group
 
+  createdMap.on('zoomend', () => {
+    currentZoom.value = createdMap.getZoom()
+  })
+
   createdMap.on('click', async (e: L.LeafletMouseEvent) => {
     const { lat, lng } = e.latlng
     selectedIssue.value = null
+    selectedCluster.value = null
 
     if (clickMarker.value) {
       createdMap.removeLayer(clickMarker.value)
@@ -218,7 +320,7 @@ onMounted(async () => {
       </div>
 
       <div class="bg-white/10 backdrop-blur-md px-4 py-2 rounded-2xl border border-white/20 text-xs font-bold">
-        Showing {{ filteredIssues.length }} of {{ issues.length }} Nodes
+        Showing {{ filteredIssues.length }} of {{ issues.length }} Nodes ({{ spatialClusters.length }} Clusters)
       </div>
     </div>
 
@@ -285,7 +387,7 @@ onMounted(async () => {
       <div class="lg:col-span-2 bg-white p-5 rounded-3xl shadow-sm border border-gray-100">
         <div id="map" class="w-full h-[580px] rounded-2xl border border-gray-200 z-0"></div>
         <p class="text-[11px] text-gray-400 mt-2 text-center">
-          Click any issue marker to inspect details, or click anywhere on the map to target new coordinates.
+          Zoom out to group nearby reports or zoom in to inspect individual pins and 50m PostGIS radius zones.
         </p>
       </div>
 
@@ -338,6 +440,51 @@ onMounted(async () => {
           </div>
         </div>
 
+        <div v-else-if="selectedCluster" class="space-y-4">
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-xs font-bold px-2.5 py-1 rounded-lg bg-indigo-50 text-indigo-700 border border-indigo-200">
+              50m Spatial Cluster · {{ selectedCluster.totalReports }} Report(s)
+            </span>
+            <button
+              type="button"
+              @click="selectedCluster = null"
+              class="text-xs text-gray-400 hover:text-gray-600 font-bold"
+            >
+              Clear
+            </button>
+          </div>
+
+          <h2 class="text-lg font-extrabold text-gray-900">Grouped Nearby Reports</h2>
+          <p class="text-xs text-gray-500">
+            Select a report below or zoom in on the map to separate individual markers.
+          </p>
+
+          <div class="space-y-2.5 max-h-[380px] overflow-y-auto pr-1">
+            <button
+              v-for="item in selectedCluster.issues"
+              :key="item.id"
+              type="button"
+              @click="selectIssueDetail(item)"
+              class="w-full text-left p-3.5 rounded-2xl border border-gray-200 hover:border-blue-400 hover:bg-blue-50/40 transition-all space-y-1"
+            >
+              <div class="flex items-center justify-between gap-2 text-[11px] font-bold">
+                <span class="text-indigo-700">#{{ item.id }} · {{ item.reportCount || 1 }} Report(s)</span>
+                <span class="text-gray-500">{{ item.status }}</span>
+              </div>
+              <div class="text-sm font-bold text-gray-900">{{ item.title }}</div>
+              <div class="text-xs text-gray-500 line-clamp-1">{{ item.description }}</div>
+            </button>
+          </div>
+
+          <button
+            type="button"
+            @click="flyToZone([selectedCluster.centerLat, selectedCluster.centerLng], 17)"
+            class="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs transition-all"
+          >
+            Zoom In to Separate Pins
+          </button>
+        </div>
+
         <div v-else-if="clickedCoord" class="space-y-4">
           <div class="flex items-center justify-between">
             <span class="text-xs font-bold px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200">
@@ -370,9 +517,9 @@ onMounted(async () => {
         </div>
 
         <div v-else class="py-20 text-center text-gray-400 space-y-2 my-auto">
-          <p class="text-base font-bold text-gray-700">Select a Map Pin</p>
+          <p class="text-base font-bold text-gray-700">Select a Map Pin or Cluster</p>
           <p class="text-xs max-w-xs mx-auto leading-relaxed text-gray-500">
-            Click any issue node on the map to inspect details and confirm, or click any spot in Moratuwa to pick coordinates.
+            Click any issue node or cluster badge on the map to inspect details and confirm, or click any spot in Moratuwa to pick coordinates.
           </p>
         </div>
       </div>
