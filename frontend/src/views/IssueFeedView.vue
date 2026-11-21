@@ -9,6 +9,32 @@ const API_BASE_URL = 'http://localhost:8081'
 const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024
 const GEO_CACHE_KEY = 'civicconnect_nominatim_cache_v1'
 const TRACKED_IDS_KEY = 'civicconnect_tracked_ids'
+const ANNOUNCEMENTS_KEY = 'civicconnect_announcements_v1'
+
+export interface AnnouncementItem {
+  id: number
+  tag: 'HIGH' | 'MEDIUM' | 'LOW'
+  date: string
+  title: string
+  summary: string
+}
+
+const DEFAULT_ANNOUNCEMENTS: AnnouncementItem[] = [
+  {
+    id: 1,
+    tag: 'HIGH',
+    date: 'Nov 2026',
+    title: 'Monsoon Drainage & Canal Clearing — Moratuwa',
+    summary: 'Field crews are inspecting low-lying roads and culverts across Katubedda, Molpe, and Soysapura.'
+  },
+  {
+    id: 2,
+    tag: 'MEDIUM',
+    date: 'Nov 2026',
+    title: 'LED Streetlight Maintenance Schedule',
+    summary: 'Faulty street lamps confirmed by residents are prioritized for evening repair batches.'
+  }
+]
 
 type PendingAdminAction = {
   execute: (authorization: string) => Promise<void>
@@ -59,22 +85,29 @@ const availableAreas = computed(() => [
   ...Array.from(new Set(Object.values(addressMap.value))).sort((a, b) => a.localeCompare(b))
 ])
 
-const announcements = [
-  {
-    id: 1,
-    tag: 'HIGH',
-    date: 'Nov 2026',
-    title: 'Monsoon Drainage & Canal Clearing — Moratuwa',
-    summary: 'Field crews are inspecting low-lying roads and culverts across Katubedda, Molpe, and Soysapura.'
-  },
-  {
-    id: 2,
-    tag: 'MEDIUM',
-    date: 'Nov 2026',
-    title: 'LED Streetlight Maintenance Schedule',
-    summary: 'Faulty street lamps confirmed by residents are prioritized for evening repair batches.'
+const loadAnnouncements = (): AnnouncementItem[] => {
+  try {
+    const raw = localStorage.getItem(ANNOUNCEMENTS_KEY)
+    if (!raw) return DEFAULT_ANNOUNCEMENTS.map(item => ({ ...item }))
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return DEFAULT_ANNOUNCEMENTS.map(item => ({ ...item }))
+    return parsed
+  } catch {
+    return DEFAULT_ANNOUNCEMENTS.map(item => ({ ...item }))
   }
-]
+}
+
+const announcements = ref<AnnouncementItem[]>(loadAnnouncements())
+
+const syncAnnouncementsFromStorage = () => {
+  announcements.value = loadAnnouncements()
+}
+
+const handleStorageEvent = (event: StorageEvent) => {
+  if (event.key === ANNOUNCEMENTS_KEY) {
+    syncAnnouncementsFromStorage()
+  }
+}
 
 const newIssue = ref({
   category: 'Roads & Drainage',
@@ -183,7 +216,7 @@ const loginForAdminAction = async () => {
   let authorization: string
   try {
     authorization = createAdminAuthorization()
-  } catch (error) {
+  } catch {
     adminLoginError.value = 'Credentials could not be encoded. Check the username and password.'
     isAuthenticatingAdmin.value = false
     return
@@ -522,6 +555,8 @@ watch(
 )
 
 onMounted(async () => {
+  syncAnnouncementsFromStorage()
+  window.addEventListener('storage', handleStorageEvent)
   applyRouteQueries()
   await fetchIssues()
 })
@@ -798,21 +833,38 @@ onMounted(async () => {
         </div>
 
         <div class="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 space-y-4">
-          <div class="flex items-center justify-between">
+          <div class="flex items-center justify-between gap-2">
             <h3 class="text-lg font-bold text-gray-900">City Announcements</h3>
-            <span class="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
-              Notices
-            </span>
+            <button
+              type="button"
+              @click="syncAnnouncementsFromStorage"
+              class="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200 transition-colors"
+            >
+              Notices ({{ announcements.length }})
+            </button>
           </div>
 
-          <div class="space-y-3">
+          <div v-if="announcements.length === 0" class="p-4 rounded-2xl border border-dashed border-gray-200 text-xs text-gray-500 text-center">
+            No active city announcements right now. Admins can publish notices from the Admin page.
+          </div>
+
+          <div v-else class="space-y-3">
             <div
               v-for="item in announcements"
               :key="item.id"
               class="p-4 rounded-2xl border border-gray-100 bg-gray-50/70 space-y-1.5"
             >
               <div class="flex items-center justify-between text-[11px] font-bold">
-                <span class="px-2 py-0.5 rounded-md bg-blue-100 text-blue-800">{{ item.tag }}</span>
+                <span
+                  class="px-2 py-0.5 rounded-md"
+                  :class="{
+                    'bg-rose-100 text-rose-800': item.tag === 'HIGH',
+                    'bg-blue-100 text-blue-800': item.tag === 'MEDIUM',
+                    'bg-emerald-100 text-emerald-800': item.tag === 'LOW'
+                  }"
+                >
+                  {{ item.tag }}
+                </span>
                 <span class="text-gray-400">{{ item.date }}</span>
               </div>
               <div class="text-sm font-bold text-gray-900">{{ item.title }}</div>

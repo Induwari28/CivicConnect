@@ -4,6 +4,33 @@ import axios from 'axios'
 import type { Issue, IssueStatus } from '@/types/issue'
 
 const API_BASE_URL = 'http://localhost:8081'
+const ANNOUNCEMENTS_KEY = 'civicconnect_announcements_v1'
+
+interface AnnouncementItem {
+  id: number
+  tag: 'HIGH' | 'MEDIUM' | 'LOW'
+  date: string
+  title: string
+  summary: string
+}
+
+const DEFAULT_ANNOUNCEMENTS: AnnouncementItem[] = [
+  {
+    id: 1,
+    tag: 'HIGH',
+    date: 'Nov 2026',
+    title: 'Monsoon Drainage & Canal Clearing — Moratuwa',
+    summary: 'Field crews are inspecting low-lying roads and culverts across Katubedda, Molpe, and Soysapura.'
+  },
+  {
+    id: 2,
+    tag: 'MEDIUM',
+    date: 'Nov 2026',
+    title: 'LED Streetlight Maintenance Schedule',
+    summary: 'Faulty street lamps confirmed by residents are prioritized for evening repair batches.'
+  }
+]
+
 const username = ref('')
 const password = ref('')
 const isAuthenticated = ref(false)
@@ -11,6 +38,31 @@ const loginError = ref('')
 const issues = ref<Issue[]>([])
 const actionMessage = ref('')
 const busyId = ref<number | null>(null)
+
+const loadAnnouncements = (): AnnouncementItem[] => {
+  try {
+    const raw = localStorage.getItem(ANNOUNCEMENTS_KEY)
+    if (!raw) return DEFAULT_ANNOUNCEMENTS.map(item => ({ ...item }))
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return DEFAULT_ANNOUNCEMENTS.map(item => ({ ...item }))
+    return parsed
+  } catch {
+    return DEFAULT_ANNOUNCEMENTS.map(item => ({ ...item }))
+  }
+}
+
+const saveAnnouncements = (items: AnnouncementItem[]) => {
+  localStorage.setItem(ANNOUNCEMENTS_KEY, JSON.stringify(items))
+  announcements.value = items
+  window.dispatchEvent(new StorageEvent('storage', { key: ANNOUNCEMENTS_KEY }))
+}
+
+const announcements = ref<AnnouncementItem[]>(loadAnnouncements())
+const noticeTitle = ref('')
+const noticeSummary = ref('')
+const noticeTag = ref<'HIGH' | 'MEDIUM' | 'LOW'>('HIGH')
+const editingNoticeId = ref<number | null>(null)
+const noticeMessage = ref('')
 
 const getAuthHeader = () => ({
   headers: { Authorization: 'Basic ' + btoa(`${username.value}:${password.value}`) }
@@ -40,6 +92,7 @@ const login = async () => {
   try {
     await axios.get(`${API_BASE_URL}/api/issues/admin`, getAuthHeader())
     isAuthenticated.value = true
+    announcements.value = loadAnnouncements()
     await fetchIssues()
   } catch {
     loginError.value = 'Invalid admin credentials. Please check username and password.'
@@ -93,6 +146,69 @@ const deleteIssue = async (id: number) => {
   } finally {
     busyId.value = null
   }
+}
+
+const formatShortDate = () =>
+  new Date().toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
+
+const resetNoticeForm = () => {
+  noticeTitle.value = ''
+  noticeSummary.value = ''
+  noticeTag.value = 'HIGH'
+  editingNoticeId.value = null
+}
+
+const saveAnnouncement = () => {
+  const title = noticeTitle.value.trim()
+  const summary = noticeSummary.value.trim()
+  if (!title || !summary) return
+
+  if (editingNoticeId.value !== null) {
+    const updated = announcements.value.map(item =>
+      item.id === editingNoticeId.value
+        ? { ...item, title, summary, tag: noticeTag.value }
+        : item
+    )
+    saveAnnouncements(updated)
+    noticeMessage.value = `Updated announcement #${editingNoticeId.value}.`
+    resetNoticeForm()
+    return
+  }
+
+  const nextId = announcements.value.reduce((max, item) => Math.max(max, item.id), 0) + 1
+  const created: AnnouncementItem = {
+    id: nextId,
+    tag: noticeTag.value,
+    date: formatShortDate(),
+    title,
+    summary
+  }
+  saveAnnouncements([created, ...announcements.value])
+  noticeMessage.value = 'Published new city announcement to the live feed.'
+  resetNoticeForm()
+}
+
+const startEditAnnouncement = (item: AnnouncementItem) => {
+  editingNoticeId.value = item.id
+  noticeTitle.value = item.title
+  noticeSummary.value = item.summary
+  noticeTag.value = item.tag
+  noticeMessage.value = ''
+}
+
+const deleteAnnouncement = (id: number) => {
+  const remaining = announcements.value.filter(item => item.id !== id)
+  saveAnnouncements(remaining)
+  if (editingNoticeId.value === id) {
+    resetNoticeForm()
+  }
+  noticeMessage.value = `Removed announcement #${id}.`
+}
+
+const restoreDefaultAnnouncements = () => {
+  saveAnnouncements(DEFAULT_ANNOUNCEMENTS.map(item => ({ ...item })))
+  resetNoticeForm()
+  noticeMessage.value = 'Restored default Moratuwa announcements.'
 }
 </script>
 
@@ -263,6 +379,111 @@ const deleteIssue = async (id: number) => {
             </tr>
           </tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- City Announcements Manager -->
+    <div class="bg-white rounded-3xl shadow-sm border border-gray-100 p-6 space-y-5">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-100 pb-4">
+        <div>
+          <h2 class="text-lg font-bold text-gray-900">City Announcements Manager</h2>
+          <p class="text-xs text-gray-500 mt-0.5">Publish, edit, or remove notices shown in the Community Live Feed sidebar.</p>
+        </div>
+        <button
+          type="button"
+          @click="restoreDefaultAnnouncements"
+          class="text-xs font-bold px-3.5 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl transition-all self-start sm:self-auto"
+        >
+          Restore Defaults
+        </button>
+      </div>
+
+      <div v-if="noticeMessage" class="px-4 py-2.5 rounded-2xl bg-emerald-50 border border-emerald-200 text-xs font-semibold text-emerald-900">
+        {{ noticeMessage }}
+      </div>
+
+      <form @submit.prevent="saveAnnouncement" class="grid grid-cols-1 md:grid-cols-6 gap-3">
+        <input
+          v-model="noticeTitle"
+          type="text"
+          required
+          placeholder="Announcement headline (e.g. Katubedda Drainage Work)"
+          class="md:col-span-3 border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+        />
+        <select
+          v-model="noticeTag"
+          class="md:col-span-1 border border-gray-300 rounded-xl px-3 py-2.5 text-sm font-bold text-gray-700 bg-white focus:ring-2 focus:ring-blue-500 outline-none"
+        >
+          <option value="HIGH">HIGH</option>
+          <option value="MEDIUM">MEDIUM</option>
+          <option value="LOW">LOW</option>
+        </select>
+        <div class="md:col-span-2 flex gap-2">
+          <button
+            type="submit"
+            class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 px-4 rounded-xl text-sm transition-all"
+          >
+            {{ editingNoticeId !== null ? 'Update Notice' : 'Publish Notice' }}
+          </button>
+          <button
+            v-if="editingNoticeId !== null"
+            type="button"
+            @click="resetNoticeForm"
+            class="bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold py-2.5 px-3 rounded-xl text-sm transition-all"
+          >
+            Cancel
+          </button>
+        </div>
+        <textarea
+          v-model="noticeSummary"
+          required
+          rows="2"
+          placeholder="Write brief notice details for residents..."
+          class="md:col-span-6 border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+        ></textarea>
+      </form>
+
+      <div class="space-y-3">
+        <div
+          v-for="notice in announcements"
+          :key="notice.id"
+          class="p-4 rounded-2xl border border-gray-100 bg-gray-50/70 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+        >
+          <div class="space-y-1">
+            <div class="flex items-center gap-2 text-[11px] font-bold">
+              <span
+                class="px-2 py-0.5 rounded-md"
+                :class="{
+                  'bg-rose-100 text-rose-800': notice.tag === 'HIGH',
+                  'bg-blue-100 text-blue-800': notice.tag === 'MEDIUM',
+                  'bg-emerald-100 text-emerald-800': notice.tag === 'LOW'
+                }"
+              >
+                {{ notice.tag }}
+              </span>
+              <span class="text-gray-400">{{ notice.date }}</span>
+            </div>
+            <div class="text-sm font-bold text-gray-900">{{ notice.title }}</div>
+            <p class="text-xs text-gray-600">{{ notice.summary }}</p>
+          </div>
+
+          <div class="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              @click="startEditAnnouncement(notice)"
+              class="px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200"
+            >
+              Edit
+            </button>
+            <button
+              type="button"
+              @click="deleteAnnouncement(notice.id)"
+              class="px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200"
+            >
+              Delete
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
