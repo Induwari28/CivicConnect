@@ -21,6 +21,16 @@ const formatPriority = (priority?: string) => {
   return priority
 }
 
+const normalizeAndSortIssues = (items: Issue[]): Issue[] => {
+  const uniqueById = new Map<number, Issue>()
+  for (const item of items) {
+    if (typeof item.id === 'number') {
+      uniqueById.set(item.id, item)
+    }
+  }
+  return Array.from(uniqueById.values()).sort((a, b) => b.id - a.id)
+}
+
 const pendingCount = computed(() => issues.value.filter(i => i.status === 'PENDING').length)
 const inProgressCount = computed(() => issues.value.filter(i => i.status === 'IN_PROGRESS').length)
 const resolvedCount = computed(() => issues.value.filter(i => i.status === 'RESOLVED').length)
@@ -39,19 +49,30 @@ const login = async () => {
 const fetchIssues = async () => {
   try {
     const response = await axios.get<Issue[]>(`${API_BASE_URL}/api/issues`)
-    issues.value = response.data.slice().reverse()
+    issues.value = normalizeAndSortIssues(response.data)
   } catch (error) {
     console.error('Failed to fetch issues', error)
+    actionMessage.value = 'Failed to load municipal reports.'
   }
 }
 
 const updateStatus = async (id: number, newStatus: IssueStatus) => {
+  if (busyId.value !== null) return
   busyId.value = id
   actionMessage.value = ''
   try {
-    await axios.patch(`${API_BASE_URL}/api/issues/${id}/status`, { status: newStatus }, getAuthHeader())
+    const response = await axios.patch<Issue>(
+      `${API_BASE_URL}/api/issues/${id}/status`,
+      { status: newStatus },
+      getAuthHeader()
+    )
+    const updatedIssue = response.data
+    issues.value = issues.value.map(item =>
+      item.id === id
+        ? { ...item, ...(updatedIssue && typeof updatedIssue === 'object' ? updatedIssue : {}), status: updatedIssue?.status ?? newStatus }
+        : item
+    )
     actionMessage.value = `Updated issue #${id} to ${newStatus}.`
-    await fetchIssues()
   } catch {
     actionMessage.value = `Failed to update status for issue #${id}.`
   } finally {
@@ -60,12 +81,13 @@ const updateStatus = async (id: number, newStatus: IssueStatus) => {
 }
 
 const deleteIssue = async (id: number) => {
+  if (busyId.value !== null) return
   busyId.value = id
   actionMessage.value = ''
   try {
     await axios.delete(`${API_BASE_URL}/api/issues/${id}`, getAuthHeader())
+    issues.value = issues.value.filter(item => item.id !== id)
     actionMessage.value = `Deleted issue #${id}.`
-    await fetchIssues()
   } catch {
     actionMessage.value = `Could not delete issue #${id} (ensure DELETE /api/issues/{id} is enabled on backend).`
   } finally {
@@ -206,28 +228,32 @@ const deleteIssue = async (id: number) => {
               </td>
               <td class="px-6 py-4 whitespace-nowrap text-xs space-x-2">
                 <button
-                  :disabled="busyId === issue.id"
+                  type="button"
+                  :disabled="busyId !== null"
                   @click="updateStatus(issue.id, 'PENDING')"
                   class="px-2.5 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-700 font-bold disabled:opacity-50"
                 >
                   Pending
                 </button>
                 <button
-                  :disabled="busyId === issue.id"
+                  type="button"
+                  :disabled="busyId !== null"
                   @click="updateStatus(issue.id, 'IN_PROGRESS')"
                   class="px-2.5 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold disabled:opacity-50"
                 >
                   In Progress
                 </button>
                 <button
-                  :disabled="busyId === issue.id"
+                  type="button"
+                  :disabled="busyId !== null"
                   @click="updateStatus(issue.id, 'RESOLVED')"
                   class="px-2.5 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 font-bold disabled:opacity-50"
                 >
                   Resolve
                 </button>
                 <button
-                  :disabled="busyId === issue.id"
+                  type="button"
+                  :disabled="busyId !== null"
                   @click="deleteIssue(issue.id)"
                   class="px-2.5 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold disabled:opacity-50"
                 >
