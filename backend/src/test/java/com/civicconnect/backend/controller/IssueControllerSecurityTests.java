@@ -1,6 +1,7 @@
 package com.civicconnect.backend.controller;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -240,7 +241,11 @@ class IssueControllerSecurityTests {
                 (byte) 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x00
         };
         MockMultipartFile image = new MockMultipartFile("image", "street.png", "image/png", pngHeader);
-        when(geminiService.analyzeIssue("Pothole", "Large hole in the road.")).thenReturn("HIGH");
+        when(geminiService.analyzeIssue(
+                eq("Pothole"),
+                eq("Large hole in the road."),
+                any(MultipartFile.class)))
+                .thenReturn("HIGH");
         when(imageStorageService.store(any(MultipartFile.class))).thenReturn("stored-image.png");
         when(issueRepository.save(any(Issue.class))).thenAnswer(invocation -> {
             Issue savedIssue = invocation.getArgument(0);

@@ -3,7 +3,6 @@ package com.civicconnect.backend.controller;
 import java.io.IOException;
 import java.time.LocalDateTime;
 import java.util.List;
-import java.util.Locale;
 import java.util.Optional;
 
 import com.civicconnect.backend.dto.IssueRequest;
@@ -74,8 +73,8 @@ public class IssueController {
     @GetMapping
     public List<IssueResponse> getAllIssues() {
         return issueRepository.findAll().stream()
-                .filter(this::hasValidLocation)
-                .map(this::toResponse)
+                .map(this::toSafeResponse)
+                .flatMap(Optional::stream)
                 .toList();
     }
 
@@ -85,6 +84,7 @@ public class IssueController {
     }
 
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
+    @Transactional
     public IssueResponse createIssue(@RequestBody IssueRequest request) {
         if (request == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Issue details are required.");
@@ -98,6 +98,7 @@ public class IssueController {
     }
 
     @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @Transactional
     public IssueResponse createIssueWithImage(
             @RequestParam("title") String title,
             @RequestParam("description") String description,
@@ -108,6 +109,7 @@ public class IssueController {
     }
 
     @PostMapping("/{id}/confirm")
+    @Transactional
     public IssueResponse confirmIssue(@PathVariable Long id) {
         Issue issue = issueRepository.findById(id)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Issue not found."));
@@ -118,10 +120,12 @@ public class IssueController {
             issue.setPriority("HIGH");
         }
 
+        issue.ensureRequiredFields();
         return toResponse(issueRepository.save(issue));
     }
 
     @PatchMapping("/{id}/status")
+    @Transactional
     public IssueResponse updateStatus(@PathVariable Long id, @RequestBody StatusUpdateRequest request) {
         if (request == null || request.status() == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Status is required.");
@@ -130,6 +134,7 @@ public class IssueController {
         Issue issue = issueRepository.findById(id)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Issue not found."));
         issue.setStatus(request.status().name());
+        issue.ensureRequiredFields();
         return toResponse(issueRepository.save(issue));
     }
 
@@ -156,6 +161,7 @@ public class IssueController {
     }
 
     @PutMapping("/{id}")
+    @Transactional
     public IssueResponse updateIssue(@PathVariable Long id, @RequestBody UpdateIssueRequest request) {
         if (request == null || request.title() == null || request.title().isBlank()
                 || request.description() == null || request.description().isBlank()) {
@@ -167,11 +173,11 @@ public class IssueController {
 
         issue.setTitle(request.title().trim());
         issue.setDescription(request.description().trim());
+        issue.ensureRequiredFields();
 
         return toResponse(issueRepository.save(issue));
     }
 
-    @Transactional
     private IssueResponse processAndSaveIssue(
             String title,
             String description,
@@ -181,12 +187,17 @@ public class IssueController {
 
         validateIssueData(title, description, latitude, longitude);
 
-        // 1. Check for an active spatial cluster within 50 meters
+        String cleanTitle = title.trim();
+        String cleanDescription = description.trim();
+        String category = extractCategory(cleanTitle);
+
+        // 1. Check for an active spatial cluster within 50 meters for the same category
         Optional<Issue> existingCluster;
         try {
-            existingCluster = issueRepository.findNearbyDuplicate(latitude, longitude);
+            existingCluster = issueRepository.findNearbyDuplicateByCategory(latitude, longitude, category);
         } catch (RuntimeException exception) {
-            LOGGER.error("Failed to query for nearby clustered issues within 50m.", exception);
+            LOGGER.error("Failed to query for nearby clustered issues within 50m for category {}.",
+                    category, exception);
             throw persistenceFailure("Unable to check for nearby issue reports.", exception);
         }
 
@@ -194,17 +205,16 @@ public class IssueController {
             Issue clusteredIssue = existingCluster.get();
             clusteredIssue.incrementReportCount();
 
-            if (description != null && !description.isBlank()) {
+            if (!cleanDescription.isBlank()) {
                 String currentDesc = clusteredIssue.getDescription() != null ? clusteredIssue.getDescription() : "";
-                if (!currentDesc.contains(description.trim())) {
+                if (!currentDesc.contains(cleanDescription)) {
                     clusteredIssue.setDescription(
                             currentDesc.isBlank()
-                                    ? description.trim()
-                                    : currentDesc + " | Additional report: " + description.trim());
+                                    ? cleanDescription
+                                    : currentDesc + " | Additional report: " + cleanDescription);
                 }
             }
 
-            // Smart Crowdsourcing Boost: 3+ reports automatically escalates priority to HIGH
             if (clusteredIssue.getReportCount() >= 3 && !"HIGH".equalsIgnoreCase(clusteredIssue.getPriority())) {
                 clusteredIssue.setPriority("HIGH");
             }
@@ -215,8 +225,8 @@ public class IssueController {
 
         // 2. Otherwise, create a brand-new issue node
         Issue issue = new Issue();
-        issue.setTitle(title);
-        issue.setDescription(description);
+        issue.setTitle(cleanTitle);
+        issue.setDescription(cleanDescription);
         issue.setReportCount(1);
         Point location = geometryFactory.createPoint(new Coordinate(longitude, latitude));
         location.setSRID(4326);
@@ -241,13 +251,28 @@ public class IssueController {
         }
 
         try {
-            issue.setPriority(normalizePriority(geminiService.analyzeIssue(title, description)));
+            String classified = image == null || image.isEmpty()
+                    ? geminiService.analyzeIssue(cleanTitle, cleanDescription)
+                    : geminiService.analyzeIssue(cleanTitle, cleanDescription, image);
+            issue.setPriority(classified);
             issue.ensureRequiredFields();
             return toResponse(saveIssue(issue, "new issue"));
         } catch (RuntimeException exception) {
             cleanupStoredImage(storedImageFilename, exception);
             throw exception;
         }
+    }
+
+    private String extractCategory(String title) {
+        if (title == null || !title.startsWith("[")) {
+            return null;
+        }
+        int closingIndex = title.indexOf(']');
+        if (closingIndex <= 1) {
+            return null;
+        }
+        String extracted = title.substring(1, closingIndex).trim();
+        return extracted.isEmpty() ? null : extracted;
     }
 
     private void validateIssueData(String title, String description, double latitude, double longitude) {
@@ -260,9 +285,23 @@ public class IssueController {
         }
     }
 
+    private Optional<IssueResponse> toSafeResponse(Issue issue) {
+        if (issue == null || !issue.hasValidLocation()) {
+            LOGGER.warn("Skipping issue {} from the feed because its location is missing or invalid.",
+                    issue != null ? issue.getId() : "unknown");
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(toResponse(issue));
+        } catch (RuntimeException exception) {
+            LOGGER.warn("Skipping issue {} because it could not be serialized.", issue.getId(), exception);
+            return Optional.empty();
+        }
+    }
+
     private IssueResponse toResponse(Issue issue) {
         Point location = issue.getLocation();
-        if (!isValidLocation(location)) {
+        if (!issue.hasValidLocation() || location == null) {
             throw new ResponseStatusException(
                     HttpStatus.INTERNAL_SERVER_ERROR,
                     "Issue has missing or invalid location coordinates.");
@@ -277,36 +316,6 @@ public class IssueController {
                 location.getX(),
                 issue.getImageUrl(),
                 issue.getReportCount());
-    }
-
-    private boolean hasValidLocation(Issue issue) {
-        if (isValidLocation(issue.getLocation())) {
-            return true;
-        }
-        LOGGER.warn("Skipping issue {} from the public feed because its location is missing or invalid.",
-                issue.getId());
-        return false;
-    }
-
-    private boolean isValidLocation(Point location) {
-        if (location == null || location.isEmpty() || location.getSRID() != 4326) {
-            return false;
-        }
-        double longitude = location.getX();
-        double latitude = location.getY();
-        return Double.isFinite(longitude) && longitude >= -180 && longitude <= 180
-                && Double.isFinite(latitude) && latitude >= -90 && latitude <= 90;
-    }
-
-    private String normalizePriority(String priority) {
-        if (priority == null) {
-            return "LOW";
-        }
-        String normalized = priority.trim().toUpperCase(Locale.ROOT);
-        return switch (normalized) {
-            case "HIGH", "MEDIUM", "LOW" -> normalized;
-            default -> "LOW";
-        };
     }
 
     private Issue saveIssue(Issue issue, String operation) {

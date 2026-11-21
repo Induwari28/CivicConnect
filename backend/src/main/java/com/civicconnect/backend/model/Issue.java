@@ -14,6 +14,8 @@ public class Issue {
     private Long id;
 
     private String title;
+
+    @Column(columnDefinition = "text")
     private String description;
     private String priority = "LOW";
     private String status = "PENDING";
@@ -33,7 +35,7 @@ public class Issue {
         if (createdAt == null) {
             createdAt = LocalDateTime.now();
         }
-        if (reportCount == null) {
+        if (reportCount == null || reportCount < 1) {
             reportCount = 1;
         }
         if (status == null || status.isBlank()) {
@@ -48,6 +50,19 @@ public class Issue {
                 default -> "LOW";
             };
         }
+    }
+
+    public boolean hasValidLocation() {
+        if (location == null || location.isEmpty()) {
+            return false;
+        }
+        if (location.getSRID() != 4326) {
+            return false;
+        }
+        double longitude = location.getX();
+        double latitude = location.getY();
+        return Double.isFinite(longitude) && longitude >= -180 && longitude <= 180
+                && Double.isFinite(latitude) && latitude >= -90 && latitude <= 90;
     }
 
     public Long getId() { return id; }

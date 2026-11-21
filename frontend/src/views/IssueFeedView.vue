@@ -451,10 +451,12 @@ const submitIssue = async () => {
   isSubmitting.value = true
   submitError.value = ''
   try {
+    const cleanTitle = newIssue.value.title.trim()
+    const categoryPrefix = newIssue.value.category ? `[${newIssue.value.category}]` : ''
     const formattedTitle =
-      newIssue.value.category && !newIssue.value.title.startsWith('[')
-        ? `[${newIssue.value.category}] ${newIssue.value.title}`
-        : newIssue.value.title
+      categoryPrefix && !cleanTitle.toLowerCase().startsWith(categoryPrefix.toLowerCase())
+        ? `${categoryPrefix} ${cleanTitle}`
+        : cleanTitle
 
     const formData = new FormData()
     formData.append('title', formattedTitle)
