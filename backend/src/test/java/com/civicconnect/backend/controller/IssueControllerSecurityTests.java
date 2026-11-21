@@ -33,6 +33,7 @@ import org.locationtech.jts.geom.PrecisionModel;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockMultipartFile;
@@ -92,6 +93,23 @@ class IssueControllerSecurityTests {
                 .andExpect(jsonPath("$[0].latitude").value(6.8))
                 .andExpect(jsonPath("$[0].longitude").value(79.9))
                 .andExpect(jsonPath("$[0].location").doesNotExist());
+    }
+
+    @Test
+    void publicIssueFeedSkipsRowsWithMissingOrInvalidLocations() throws Exception {
+        Issue missingLocation = new Issue();
+        missingLocation.setId(4L);
+
+        Issue invalidCoordinates = new Issue();
+        invalidCoordinates.setId(5L);
+        invalidCoordinates.setLocation(new GeometryFactory(new PrecisionModel(), 4326)
+                .createPoint(new Coordinate(181, 6.8)));
+
+        when(issueRepository.findAll()).thenReturn(List.of(missingLocation, invalidCoordinates));
+
+        mockMvc.perform(get("/api/issues"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$").isEmpty());
     }
 
     @Test
@@ -297,6 +315,28 @@ class IssueControllerSecurityTests {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id").value(9))
                 .andExpect(jsonPath("$.priority").value("HIGH"));
+    }
+
+    @Test
+    void returnsClearServerErrorWhenIssuePersistenceFails() throws Exception {
+        when(geminiService.analyzeIssue("Pothole", "Large hole in the road.")).thenReturn("HIGH");
+        when(issueRepository.save(any(Issue.class)))
+                .thenThrow(new DataAccessResourceFailureException("database unavailable"));
+
+        mockMvc.perform(post("/api/issues")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "title": "Pothole",
+                                  "description": "Large hole in the road.",
+                                  "latitude": 6.8,
+                                  "longitude": 79.9
+                                }
+                                """))
+                .andExpect(status().isInternalServerError())
+                .andExpect(result -> org.junit.jupiter.api.Assertions.assertEquals(
+                        "Unable to save the issue report.",
+                        result.getResponse().getErrorMessage()));
     }
 
     private String basicAuthorization() {

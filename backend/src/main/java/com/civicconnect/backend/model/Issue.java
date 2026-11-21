@@ -3,6 +3,7 @@ package com.civicconnect.backend.model;
 import jakarta.persistence.*;
 import org.locationtech.jts.geom.Point;
 import java.time.LocalDateTime;
+import java.util.Locale;
 
 @Entity
 @Table(name = "issues")
@@ -14,8 +15,8 @@ public class Issue {
 
     private String title;
     private String description;
-    private String priority;
-    private String status;
+    private String priority = "LOW";
+    private String status = "PENDING";
     private String imageUrl;
 
     @Column(name = "report_count")
@@ -25,6 +26,29 @@ public class Issue {
     private Point location;
 
     private LocalDateTime createdAt = LocalDateTime.now();
+
+    @PrePersist
+    @PreUpdate
+    public void ensureRequiredFields() {
+        if (createdAt == null) {
+            createdAt = LocalDateTime.now();
+        }
+        if (reportCount == null) {
+            reportCount = 1;
+        }
+        if (status == null || status.isBlank()) {
+            status = "PENDING";
+        }
+        if (priority == null) {
+            priority = "LOW";
+        } else {
+            String normalizedPriority = priority.trim().toUpperCase(Locale.ROOT);
+            priority = switch (normalizedPriority) {
+                case "HIGH", "MEDIUM", "LOW" -> normalizedPriority;
+                default -> "LOW";
+            };
+        }
+    }
 
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }

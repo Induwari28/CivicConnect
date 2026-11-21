@@ -19,7 +19,7 @@ import org.springframework.web.client.RestTemplate;
 class GeminiServiceTests {
 
     private static final String GEMINI_URL =
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent";
 
     @Test
     void parsesPriorityFromCandidatePartsAndSendsApiKeyHeader() {
@@ -48,7 +48,7 @@ class GeminiServiceTests {
     }
 
     @Test
-    void returnsUnclassifiedWhenGeminiRespondsWithAnHttpError() {
+    void fallsBackToValidPriorityWhenGeminiRespondsWithAnHttpError() {
         RestTemplate restTemplate = new RestTemplate();
         MockRestServiceServer server = MockRestServiceServer.bindTo(restTemplate).build();
         GeminiService service = new GeminiService("test-key", restTemplate);
@@ -58,12 +58,12 @@ class GeminiServiceTests {
                         .contentType(MediaType.APPLICATION_JSON)
                         .body("{\"error\":{\"message\":\"invalid API key\"}}"));
 
-        assertEquals("UNCLASSIFIED", service.analyzeIssue("Pothole", "Road damage."));
+        assertEquals("MEDIUM", service.analyzeIssue("Pothole", "Road damage."));
         server.verify();
     }
 
     @Test
-    void returnsUnclassifiedWhenTheGeminiRequestTimesOut() {
+    void fallsBackToValidPriorityWhenTheGeminiRequestTimesOut() {
         RestTemplate restTemplate = new RestTemplate();
         MockRestServiceServer server = MockRestServiceServer.bindTo(restTemplate).build();
         GeminiService service = new GeminiService("test-key", restTemplate);
@@ -71,7 +71,29 @@ class GeminiServiceTests {
         server.expect(requestTo(GEMINI_URL))
                 .andRespond(withException(new IOException("connect timed out")));
 
-        assertEquals("UNCLASSIFIED", service.analyzeIssue("Pothole", "Road damage."));
+        assertEquals("MEDIUM", service.analyzeIssue("Pothole", "Road damage."));
+        server.verify();
+    }
+
+    @Test
+    void usesRuleBasedPriorityWhenApiKeyIsMissing() {
+        GeminiService service = new GeminiService("", new RestTemplate());
+
+        assertEquals("HIGH", service.analyzeIssue("Exposed cable", "Sparking near the road."));
+    }
+
+    @Test
+    void fallsBackWhenGeminiReturnsNoRecognizedPriority() {
+        RestTemplate restTemplate = new RestTemplate();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(restTemplate).build();
+        GeminiService service = new GeminiService("test-key", restTemplate);
+
+        server.expect(requestTo(GEMINI_URL))
+                .andRespond(withSuccess("""
+                        {"candidates":[{"content":{"parts":[{"text":"urgent"}]}}]}
+                        """, MediaType.APPLICATION_JSON));
+
+        assertEquals("LOW", service.analyzeIssue("Faded paint", "Routine maintenance."));
         server.verify();
     }
 }

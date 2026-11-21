@@ -14,11 +14,19 @@ public interface IssueRepository extends JpaRepository<Issue, Long> {
             SELECT *
             FROM issues
             WHERE status <> 'RESOLVED'
-              AND ST_DWithin(
-                  location::geography,
-                  ST_SetSRID(ST_MakePoint(:longitude, :latitude), 4326)::geography,
-                  50.0
-              )
+              AND CASE
+                  WHEN location IS NOT NULL
+                       AND ST_SRID(location) = 4326
+                       AND NOT ST_IsEmpty(location)
+                       AND ST_X(location) BETWEEN -180 AND 180
+                       AND ST_Y(location) BETWEEN -90 AND 90
+                  THEN ST_DWithin(
+                      location::geography,
+                      ST_SetSRID(ST_MakePoint(:longitude, :latitude), 4326)::geography,
+                      50.0
+                  )
+                  ELSE FALSE
+              END
             ORDER BY report_count DESC NULLS LAST, id ASC
             LIMIT 1
             """, nativeQuery = true)

@@ -1,7 +1,9 @@
 package com.civicconnect.backend.controller;
 
 import java.io.IOException;
+import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 
 import com.civicconnect.backend.dto.IssueRequest;
@@ -16,7 +18,6 @@ import org.locationtech.jts.geom.Point;
 import org.locationtech.jts.geom.PrecisionModel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.transaction.annotation.Transactional;
@@ -72,7 +73,10 @@ public class IssueController {
 
     @GetMapping
     public List<IssueResponse> getAllIssues() {
-        return issueRepository.findAll().stream().map(this::toResponse).toList();
+        return issueRepository.findAll().stream()
+                .filter(this::hasValidLocation)
+                .map(this::toResponse)
+                .toList();
     }
 
     @GetMapping("/admin")
@@ -181,9 +185,9 @@ public class IssueController {
         Optional<Issue> existingCluster;
         try {
             existingCluster = issueRepository.findNearbyDuplicate(latitude, longitude);
-        } catch (DataAccessException exception) {
+        } catch (RuntimeException exception) {
             LOGGER.error("Failed to query for nearby clustered issues within 50m.", exception);
-            throw exception;
+            throw persistenceFailure("Unable to check for nearby issue reports.", exception);
         }
 
         if (existingCluster.isPresent()) {
@@ -205,12 +209,8 @@ public class IssueController {
                 clusteredIssue.setPriority("HIGH");
             }
 
-            try {
-                return toResponse(issueRepository.save(clusteredIssue));
-            } catch (DataAccessException exception) {
-                LOGGER.error("Failed to save updated 50m clustered issue.", exception);
-                throw exception;
-            }
+            clusteredIssue.ensureRequiredFields();
+            return toResponse(saveIssue(clusteredIssue, "updated clustered issue"));
         }
 
         // 2. Otherwise, create a brand-new issue node
@@ -222,6 +222,7 @@ public class IssueController {
         location.setSRID(4326);
         issue.setLocation(location);
         issue.setStatus(IssueStatus.PENDING.name());
+        issue.setCreatedAt(LocalDateTime.now());
 
         String storedImageFilename = null;
         try {
@@ -240,11 +241,11 @@ public class IssueController {
         }
 
         try {
-            issue.setPriority(geminiService.analyzeIssue(title, description));
-            return toResponse(issueRepository.save(issue));
+            issue.setPriority(normalizePriority(geminiService.analyzeIssue(title, description)));
+            issue.ensureRequiredFields();
+            return toResponse(saveIssue(issue, "new issue"));
         } catch (RuntimeException exception) {
             cleanupStoredImage(storedImageFilename, exception);
-            LOGGER.error("Failed to triage or persist an issue report.", exception);
             throw exception;
         }
     }
@@ -261,8 +262,10 @@ public class IssueController {
 
     private IssueResponse toResponse(Issue issue) {
         Point location = issue.getLocation();
-        if (location == null) {
-            throw new IllegalStateException("Issue location is missing.");
+        if (!isValidLocation(location)) {
+            throw new ResponseStatusException(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Issue has missing or invalid location coordinates.");
         }
         return new IssueResponse(
                 issue.getId(),
@@ -274,6 +277,49 @@ public class IssueController {
                 location.getX(),
                 issue.getImageUrl(),
                 issue.getReportCount());
+    }
+
+    private boolean hasValidLocation(Issue issue) {
+        if (isValidLocation(issue.getLocation())) {
+            return true;
+        }
+        LOGGER.warn("Skipping issue {} from the public feed because its location is missing or invalid.",
+                issue.getId());
+        return false;
+    }
+
+    private boolean isValidLocation(Point location) {
+        if (location == null || location.isEmpty() || location.getSRID() != 4326) {
+            return false;
+        }
+        double longitude = location.getX();
+        double latitude = location.getY();
+        return Double.isFinite(longitude) && longitude >= -180 && longitude <= 180
+                && Double.isFinite(latitude) && latitude >= -90 && latitude <= 90;
+    }
+
+    private String normalizePriority(String priority) {
+        if (priority == null) {
+            return "LOW";
+        }
+        String normalized = priority.trim().toUpperCase(Locale.ROOT);
+        return switch (normalized) {
+            case "HIGH", "MEDIUM", "LOW" -> normalized;
+            default -> "LOW";
+        };
+    }
+
+    private Issue saveIssue(Issue issue, String operation) {
+        try {
+            return issueRepository.save(issue);
+        } catch (RuntimeException exception) {
+            LOGGER.error("Failed to persist {}.", operation, exception);
+            throw persistenceFailure("Unable to save the issue report.", exception);
+        }
+    }
+
+    private ResponseStatusException persistenceFailure(String message, RuntimeException cause) {
+        return new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, message, cause);
     }
 
     private void cleanupStoredImage(String filename, RuntimeException originalException) {
