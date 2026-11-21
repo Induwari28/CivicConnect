@@ -2,12 +2,16 @@ package com.civicconnect.backend.controller;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.hamcrest.Matchers.containsString;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.options;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -91,13 +95,23 @@ class IssueControllerSecurityTests {
     }
 
     @Test
-    void adminPatchPreflightAllowsFrontendAuthorizationHeader() throws Exception {
-        mockMvc.perform(options("/api/issues/7/status")
-                        .header(HttpHeaders.ORIGIN, "http://localhost:5173")
-                        .header(HttpHeaders.ACCESS_CONTROL_REQUEST_METHOD, "PATCH")
-                        .header(HttpHeaders.ACCESS_CONTROL_REQUEST_HEADERS, "authorization,content-type"))
-                .andExpect(status().isOk())
-                .andExpect(header().string(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN, "http://localhost:5173"));
+    void preflightAllowsFrontendMethodsAndAuthorizationHeader() throws Exception {
+        for (String method : List.of("GET", "POST", "PATCH", "PUT", "DELETE")) {
+            mockMvc.perform(options("/api/issues/7")
+                            .header(HttpHeaders.ORIGIN, "http://localhost:5173")
+                            .header(HttpHeaders.ACCESS_CONTROL_REQUEST_METHOD, method)
+                            .header(HttpHeaders.ACCESS_CONTROL_REQUEST_HEADERS, "authorization,content-type"))
+                    .andExpect(status().isOk())
+                    .andExpect(header().string(
+                            HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN,
+                            "http://localhost:5173"))
+                    .andExpect(header().string(
+                            HttpHeaders.ACCESS_CONTROL_ALLOW_METHODS,
+                            containsString(method)))
+                    .andExpect(header().string(
+                            HttpHeaders.ACCESS_CONTROL_ALLOW_METHODS,
+                            containsString("OPTIONS")));
+        }
     }
 
     @Test
@@ -114,13 +128,15 @@ class IssueControllerSecurityTests {
         when(issueRepository.findById(7L)).thenReturn(Optional.of(issue));
         when(issueRepository.save(any(Issue.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
-        mockMvc.perform(patch("/api/issues/7/status")
-                        .header("Authorization", basicAuthorization())
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"status\":\"IN_PROGRESS\"}"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.id").value(7))
-                .andExpect(jsonPath("$.status").value("IN_PROGRESS"));
+        for (String statusValue : List.of("PENDING", "IN_PROGRESS", "RESOLVED")) {
+            mockMvc.perform(patch("/api/issues/7/status")
+                            .header("Authorization", basicAuthorization())
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"status\":\"" + statusValue + "\"}"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.id").value(7))
+                    .andExpect(jsonPath("$.status").value(statusValue));
+        }
     }
 
     @Test
@@ -142,6 +158,62 @@ class IssueControllerSecurityTests {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id").value(7))
                 .andExpect(jsonPath("$.reportCount").value(2));
+
+        mockMvc.perform(post("/api/issues/7/confirm"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.reportCount").value(3))
+                .andExpect(jsonPath("$.priority").value("HIGH"));
+    }
+
+    @Test
+    void issueEditingRequiresAdminAndRejectsBlankFields() throws Exception {
+        Issue issue = new Issue();
+        issue.setId(7L);
+        issue.setTitle("Old title");
+        issue.setDescription("Old description");
+        issue.setStatus("PENDING");
+        issue.setPriority("LOW");
+        issue.setLocation(new GeometryFactory(new PrecisionModel(), 4326)
+                .createPoint(new Coordinate(79.9, 6.8)));
+        when(issueRepository.findById(7L)).thenReturn(Optional.of(issue));
+        when(issueRepository.save(any(Issue.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        mockMvc.perform(put("/api/issues/7")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"title\":\"Updated title\",\"description\":\"Updated description\"}"))
+                .andExpect(status().isUnauthorized());
+
+        mockMvc.perform(put("/api/issues/7")
+                        .header("Authorization", basicAuthorization())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"title\":\"Updated title\",\"description\":\"Updated description\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.title").value("Updated title"))
+                .andExpect(jsonPath("$.description").value("Updated description"));
+
+        mockMvc.perform(put("/api/issues/7")
+                        .header("Authorization", basicAuthorization())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"title\":\"  \",\"description\":\"Updated description\"}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void issueDeletionRequiresAdminAndRemovesItsStoredImage() throws Exception {
+        Issue issue = new Issue();
+        issue.setId(7L);
+        issue.setImageUrl("/uploads/stored-image.png");
+        when(issueRepository.findById(7L)).thenReturn(Optional.of(issue));
+
+        mockMvc.perform(delete("/api/issues/7"))
+                .andExpect(status().isUnauthorized());
+
+        mockMvc.perform(delete("/api/issues/7")
+                        .header("Authorization", basicAuthorization()))
+                .andExpect(status().isNoContent());
+
+        verify(issueRepository).delete(issue);
+        verify(imageStorageService).delete("stored-image.png");
     }
 
     @Test
@@ -170,6 +242,37 @@ class IssueControllerSecurityTests {
                 .andExpect(jsonPath("$.imageUrl").value("/uploads/stored-image.png"));
 
         verify(imageStorageService).store(any(MultipartFile.class));
+    }
+
+    @Test
+    void acceptsMultipartIssueWithoutAnImageOrWithAnEmptyImage() throws Exception {
+        when(geminiService.analyzeIssue("Pothole", "Large hole in the road.")).thenReturn("HIGH");
+        when(issueRepository.save(any(Issue.class))).thenAnswer(invocation -> {
+            Issue savedIssue = invocation.getArgument(0);
+            savedIssue.setId(10L);
+            return savedIssue;
+        });
+
+        mockMvc.perform(multipart("/api/issues")
+                        .param("title", "Pothole")
+                        .param("description", "Large hole in the road.")
+                        .param("latitude", "6.8")
+                        .param("longitude", "79.9"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.imageUrl").doesNotExist());
+
+        MockMultipartFile emptyImage =
+                new MockMultipartFile("image", "", "application/octet-stream", new byte[0]);
+        mockMvc.perform(multipart("/api/issues")
+                        .file(emptyImage)
+                        .param("title", "Pothole")
+                        .param("description", "Large hole in the road.")
+                        .param("latitude", "6.8")
+                        .param("longitude", "79.9"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.imageUrl").doesNotExist());
+
+        verifyNoInteractions(imageStorageService);
     }
 
     @Test

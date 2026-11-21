@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import axios from 'axios'
-import type { Issue } from '@/types/issue'
+import type { Issue, IssueStatus } from '@/types/issue'
 
 const API_BASE_URL = 'http://localhost:8081'
 const username = ref('')
@@ -45,7 +45,7 @@ const fetchIssues = async () => {
   }
 }
 
-const updateStatus = async (id: number, newStatus: string) => {
+const updateStatus = async (id: number, newStatus: IssueStatus) => {
   busyId.value = id
   actionMessage.value = ''
   try {
@@ -205,6 +205,13 @@ const deleteIssue = async (id: number) => {
                 </span>
               </td>
               <td class="px-6 py-4 whitespace-nowrap text-xs space-x-2">
+                <button
+                  :disabled="busyId === issue.id"
+                  @click="updateStatus(issue.id, 'PENDING')"
+                  class="px-2.5 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-700 font-bold disabled:opacity-50"
+                >
+                  Pending
+                </button>
                 <button
                   :disabled="busyId === issue.id"
                   @click="updateStatus(issue.id, 'IN_PROGRESS')"

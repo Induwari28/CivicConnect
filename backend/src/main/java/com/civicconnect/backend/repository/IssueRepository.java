@@ -10,11 +10,20 @@ import java.util.Optional;
 @Repository
 public interface IssueRepository extends JpaRepository<Issue, Long> {
 
-    @Query(value = "SELECT * FROM issues WHERE status = 'PENDING' " +
-                   "AND ST_DWithin(location::geography, ST_SetSRID(ST_MakePoint(:longitude, :latitude), 4326)::geography, 50) " +
-                   "AND LOWER(title) LIKE LOWER(CONCAT('%', :title, '%')) LIMIT 1", 
-           nativeQuery = true)
-    Optional<Issue> findNearbyDuplicate(@Param("latitude") double latitude, 
-                                        @Param("longitude") double longitude, 
-                                        @Param("title") String title);
+    @Query(value = """
+            SELECT *
+            FROM issues
+            WHERE ST_DWithin(
+                location::geography,
+                ST_SetSRID(ST_MakePoint(:longitude, :latitude), 4326)::geography,
+                50.0
+            )
+            AND LOWER(title) LIKE LOWER(CONCAT('%', :title, '%'))
+            ORDER BY id
+            LIMIT 1
+            """, nativeQuery = true)
+    Optional<Issue> findNearbyDuplicate(
+            @Param("latitude") double latitude,
+            @Param("longitude") double longitude,
+            @Param("title") String title);
 }

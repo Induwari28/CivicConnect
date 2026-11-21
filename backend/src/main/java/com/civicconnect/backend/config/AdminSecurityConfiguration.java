@@ -1,7 +1,8 @@
 package com.civicconnect.backend.config;
 
 import java.util.List;
-
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -16,8 +17,6 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.SecurityFilterChain;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
@@ -33,11 +32,12 @@ public class AdminSecurityConfiguration {
                 .cors(Customizer.withDefaults())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(authorize -> authorize
-        .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
-        .requestMatchers(HttpMethod.PATCH, "/api/issues/*/status").hasRole("ADMIN")
-        .requestMatchers(HttpMethod.DELETE, "/api/issues/*").hasRole("ADMIN")
-        .requestMatchers(HttpMethod.GET, "/api/issues/admin").hasRole("ADMIN")
-        .anyRequest().permitAll())
+                        .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+                        .requestMatchers(HttpMethod.PATCH, "/api/issues/*/status").hasRole("ADMIN")
+                        .requestMatchers(HttpMethod.PUT, "/api/issues/*").hasRole("ADMIN")
+                        .requestMatchers(HttpMethod.DELETE, "/api/issues/*").hasRole("ADMIN")
+                        .requestMatchers(HttpMethod.GET, "/api/issues/admin").hasRole("ADMIN")
+                        .anyRequest().permitAll())
                 .httpBasic(Customizer.withDefaults())
                 .build();
     }
@@ -45,15 +45,15 @@ public class AdminSecurityConfiguration {
     @Bean
     UserDetailsService adminUserDetailsService(
             @Value("${app.admin.username:}") String username,
-            @Value("${app.admin.password:}") String password) {
+            @Value("${app.admin.password:}") String password,
+            PasswordEncoder passwordEncoder) {
         if (username.isBlank() || password.isBlank()) {
             LOGGER.warn("Admin credentials are not configured; admin endpoints will remain inaccessible.");
             return new InMemoryUserDetailsManager();
         }
 
-        // Use {noop} prefix so Spring accepts the plain-text password from properties directly
         UserDetails admin = User.withUsername(username)
-                .password("{noop}" + password)
+                .password(passwordEncoder.encode(password))
                 .roles("ADMIN")
                 .build();
         return new InMemoryUserDetailsManager(admin);
@@ -68,7 +68,7 @@ public class AdminSecurityConfiguration {
     CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
         configuration.setAllowedOrigins(List.of("http://localhost:5173"));
-        configuration.setAllowedMethods(List.of("GET", "POST", "PATCH", "OPTIONS"));
+        configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         configuration.setAllowedHeaders(List.of("Authorization", "Content-Type"));
         configuration.setAllowCredentials(false);
         configuration.setMaxAge(3600L);

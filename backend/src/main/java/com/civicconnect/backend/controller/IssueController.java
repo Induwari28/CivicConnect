@@ -14,16 +14,23 @@ import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.GeometryFactory;
 import org.locationtech.jts.geom.Point;
 import org.locationtech.jts.geom.PrecisionModel;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.CrossOrigin;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
@@ -32,6 +39,7 @@ import org.springframework.web.server.ResponseStatusException;
 @RequestMapping("/api/issues")
 @CrossOrigin(origins = "http://localhost:5173")
 public class IssueController {
+    private static final Logger LOGGER = LoggerFactory.getLogger(IssueController.class);
 
     private final IssueRepository issueRepository;
     private final GeminiService geminiService;
@@ -60,6 +68,8 @@ public class IssueController {
 
     public record StatusUpdateRequest(IssueStatus status) {}
 
+    public record UpdateIssueRequest(String title, String description) {}
+
     @GetMapping
     public List<IssueResponse> getAllIssues() {
         return issueRepository.findAll().stream().map(this::toResponse).toList();
@@ -72,6 +82,9 @@ public class IssueController {
 
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
     public IssueResponse createIssue(@RequestBody IssueRequest request) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Issue details are required.");
+        }
         return processAndSaveIssue(
                 request.getTitle(),
                 request.getDescription(),
@@ -116,6 +129,44 @@ public IssueResponse confirmIssue(@PathVariable Long id) {
         return toResponse(issueRepository.save(issue));
     }
 
+    @DeleteMapping("/{id}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    @Transactional
+    public void deleteIssue(@PathVariable Long id) {
+        Issue issue = issueRepository.findById(id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Issue not found."));
+        issueRepository.delete(issue);
+
+        String imageFilename = getStoredImageFilename(issue.getImageUrl());
+        if (imageFilename == null) {
+            return;
+        }
+        try {
+            imageStorageService.delete(imageFilename);
+        } catch (IOException exception) {
+            throw new ResponseStatusException(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Unable to delete the issue photo.",
+                    exception);
+        }
+    }
+
+    @PutMapping("/{id}")
+    public IssueResponse updateIssue(@PathVariable Long id, @RequestBody UpdateIssueRequest request) {
+        if (request == null || request.title() == null || request.title().isBlank()
+                || request.description() == null || request.description().isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Title and description are required.");
+        }
+
+        Issue issue = issueRepository.findById(id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Issue not found."));
+
+        issue.setTitle(request.title().trim());
+        issue.setDescription(request.description().trim());
+
+        return toResponse(issueRepository.save(issue));
+    }
+
     private IssueResponse processAndSaveIssue(
             String title,
             String description,
@@ -123,8 +174,16 @@ public IssueResponse confirmIssue(@PathVariable Long id) {
             double longitude,
             MultipartFile image) {
 
+        validateIssueData(title, description, latitude, longitude);
+
         // 1. Check for spatial duplicate within 50 meters
-        Optional<Issue> existingDuplicate = issueRepository.findNearbyDuplicate(latitude, longitude, title);
+        Optional<Issue> existingDuplicate;
+        try {
+            existingDuplicate = issueRepository.findNearbyDuplicate(latitude, longitude, title);
+        } catch (DataAccessException exception) {
+            LOGGER.error("Failed to query for nearby duplicate issues.", exception);
+            throw exception;
+        }
 
         if (existingDuplicate.isPresent()) {
             Issue duplicate = existingDuplicate.get();
@@ -134,8 +193,13 @@ public IssueResponse confirmIssue(@PathVariable Long id) {
             if (duplicate.getReportCount() >= 3 && !"HIGH".equalsIgnoreCase(duplicate.getPriority())) {
                 duplicate.setPriority("HIGH");
             }
-            
-            return toResponse(issueRepository.save(duplicate));
+
+            try {
+                return toResponse(issueRepository.save(duplicate));
+            } catch (DataAccessException exception) {
+                LOGGER.error("Failed to save updated duplicate issue.", exception);
+                throw exception;
+            }
         }
 
         // 2. Otherwise, create a brand-new issue
@@ -144,6 +208,7 @@ public IssueResponse confirmIssue(@PathVariable Long id) {
         issue.setDescription(description);
         issue.setReportCount(1);
         Point location = geometryFactory.createPoint(new Coordinate(longitude, latitude));
+        location.setSRID(4326);
         issue.setLocation(location);
         issue.setStatus(IssueStatus.PENDING.name());
 
@@ -153,6 +218,7 @@ public IssueResponse confirmIssue(@PathVariable Long id) {
                 storedImageFilename = imageStorageService.store(image);
             }
         } catch (IOException exception) {
+            LOGGER.error("Failed to store the uploaded image for an issue report.", exception);
             throw new ResponseStatusException(
                     HttpStatus.INTERNAL_SERVER_ERROR,
                     "Unable to store the uploaded image.",
@@ -167,7 +233,18 @@ public IssueResponse confirmIssue(@PathVariable Long id) {
             return toResponse(issueRepository.save(issue));
         } catch (RuntimeException exception) {
             cleanupStoredImage(storedImageFilename, exception);
+            LOGGER.error("Failed to triage or persist an issue report.", exception);
             throw exception;
+        }
+    }
+
+    private void validateIssueData(String title, String description, double latitude, double longitude) {
+        if (title == null || title.isBlank() || description == null || description.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Title and description are required.");
+        }
+        if (!Double.isFinite(latitude) || latitude < -90 || latitude > 90
+                || !Double.isFinite(longitude) || longitude < -180 || longitude > 180) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Valid latitude and longitude are required.");
         }
     }
 
@@ -195,5 +272,13 @@ public IssueResponse confirmIssue(@PathVariable Long id) {
         } catch (IOException cleanupException) {
             originalException.addSuppressed(cleanupException);
         }
+    }
+
+    private String getStoredImageFilename(String imageUrl) {
+        String uploadPrefix = "/uploads/";
+        if (imageUrl == null || !imageUrl.startsWith(uploadPrefix)) {
+            return null;
+        }
+        return imageUrl.substring(uploadPrefix.length());
     }
 }

@@ -10,11 +10,32 @@ const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024
 const GEO_CACHE_KEY = 'civicconnect_nominatim_cache_v1'
 const TRACKED_IDS_KEY = 'civicconnect_tracked_ids'
 
+type PendingAdminAction = {
+  execute: (authorization: string) => Promise<void>
+  onError: (error: unknown) => void
+}
+
 const issues = ref<Issue[]>([])
 const addressMap = ref<Record<number, string>>({})
 const inFlightKeys = new Set<string>()
 const confirmingId = ref<number | null>(null)
+const deletingId = ref<number | null>(null)
+const adminAuthorization = ref<string | null>(null)
+const adminUsername = ref('')
+const adminPassword = ref('')
+const adminLoginError = ref('')
+const adminActionError = ref('')
+const isAdminLoginOpen = ref(false)
+const isAuthenticatingAdmin = ref(false)
+const pendingAdminAction = ref<PendingAdminAction | null>(null)
 const selectedIssue = ref<Issue | null>(null)
+const editingIssue = ref<Issue | null>(null)
+const editForm = ref({
+  title: '',
+  description: ''
+})
+const isSavingEdit = ref(false)
+const editError = ref('')
 const copiedGps = ref(false)
 const loading = ref(true)
 const isSubmitting = ref(false)
@@ -117,6 +138,145 @@ const getStatusStep = (status: Issue['status']) => {
 const openIssueModal = (issue: Issue) => {
   copiedGps.value = false
   selectedIssue.value = issue
+}
+
+const openEditModal = (issue: Issue) => {
+  editError.value = ''
+  editingIssue.value = issue
+  editForm.value = {
+    title: issue.title,
+    description: issue.description
+  }
+}
+
+const createAdminAuthorization = () => {
+  const credentials = new TextEncoder().encode(`${adminUsername.value}:${adminPassword.value}`)
+  const binaryCredentials = Array.from(credentials, byte => String.fromCharCode(byte)).join('')
+  return `Basic ${btoa(binaryCredentials)}`
+}
+
+const runAdminAction = async (action: PendingAdminAction) => {
+  if (!adminAuthorization.value) {
+    pendingAdminAction.value = action
+    adminLoginError.value = ''
+    isAdminLoginOpen.value = true
+    return
+  }
+
+  try {
+    await action.execute(adminAuthorization.value)
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 401) {
+      adminAuthorization.value = null
+      pendingAdminAction.value = action
+      adminLoginError.value = 'Admin credentials were rejected. Please sign in again.'
+      isAdminLoginOpen.value = true
+      return
+    }
+    action.onError(error)
+  }
+}
+
+const loginForAdminAction = async () => {
+  adminLoginError.value = ''
+  isAuthenticatingAdmin.value = true
+  let authorization: string
+  try {
+    authorization = createAdminAuthorization()
+  } catch (error) {
+    adminLoginError.value = 'Credentials could not be encoded. Check the username and password.'
+    isAuthenticatingAdmin.value = false
+    return
+  }
+
+  try {
+    await axios.get(`${API_BASE_URL}/api/issues/admin`, {
+      headers: { Authorization: authorization }
+    })
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 401) {
+      adminLoginError.value = 'Invalid admin credentials. Please check username and password.'
+    } else {
+      console.error('Failed to authenticate admin:', error)
+      adminLoginError.value = 'Could not verify admin access. Check that the backend is available.'
+    }
+    isAuthenticatingAdmin.value = false
+    return
+  }
+
+  isAuthenticatingAdmin.value = false
+  adminAuthorization.value = authorization
+  adminPassword.value = ''
+  isAdminLoginOpen.value = false
+  const action = pendingAdminAction.value
+  pendingAdminAction.value = null
+  if (action) {
+    await runAdminAction(action)
+  }
+}
+
+const cancelAdminLogin = () => {
+  pendingAdminAction.value = null
+  isAdminLoginOpen.value = false
+  adminLoginError.value = ''
+  adminPassword.value = ''
+}
+
+const saveEditedIssue = async () => {
+  if (!editingIssue.value) return
+  const issueId = editingIssue.value.id
+  const title = editForm.value.title
+  const description = editForm.value.description
+  editError.value = ''
+  await runAdminAction({
+    execute: async (authorization) => {
+      isSavingEdit.value = true
+      try {
+        await axios.put(`${API_BASE_URL}/api/issues/${issueId}`, { title, description }, {
+          headers: { Authorization: authorization }
+        })
+        editingIssue.value = null
+        await fetchIssues()
+        if (selectedIssue.value?.id === issueId) {
+          const updated = issues.value.find(i => i.id === issueId)
+          if (updated) selectedIssue.value = updated
+        }
+      } finally {
+        isSavingEdit.value = false
+      }
+    },
+    onError: (error) => {
+      console.error('Failed to update issue:', error)
+      editError.value = 'Failed to save changes. Please check your inputs and try again.'
+    }
+  })
+}
+
+const deleteIssue = async (id: number) => {
+  adminActionError.value = ''
+  await runAdminAction({
+    execute: async (authorization) => {
+      deletingId.value = id
+      try {
+        await axios.delete(`${API_BASE_URL}/api/issues/${id}`, {
+          headers: { Authorization: authorization }
+        })
+        if (selectedIssue.value?.id === id) {
+          selectedIssue.value = null
+        }
+        if (editingIssue.value?.id === id) {
+          editingIssue.value = null
+        }
+        issues.value = issues.value.filter(i => i.id !== id)
+      } finally {
+        deletingId.value = null
+      }
+    },
+    onError: (error) => {
+      console.error('Failed to delete issue:', error)
+      adminActionError.value = 'Failed to delete the issue. Please try again.'
+    }
+  })
 }
 
 const copyCoordinates = async (issue: Issue) => {
@@ -389,6 +549,14 @@ onMounted(async () => {
       </button>
     </div>
 
+    <p
+      v-if="adminActionError"
+      role="alert"
+      class="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700"
+    >
+      {{ adminActionError }}
+    </p>
+
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
       <div class="lg:col-span-2 space-y-6">
         <div class="bg-white p-5 rounded-2xl shadow-xs border border-gray-100 space-y-4">
@@ -567,14 +735,34 @@ onMounted(async () => {
                     View Details
                   </button>
                 </div>
-                <button
-                  type="button"
-                  :disabled="confirmingId === issue.id"
-                  @click="confirmIssue(issue.id)"
-                  class="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 transition-all disabled:opacity-50"
-                >
-                  {{ confirmingId === issue.id ? 'Confirming...' : '+ Confirm / Me Too' }}
-                </button>
+
+                <div class="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    @click="openEditModal(issue)"
+                    class="px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 transition-all"
+                  >
+                    Edit
+                  </button>
+
+                  <button
+                    type="button"
+                    :disabled="deletingId === issue.id"
+                    @click="deleteIssue(issue.id)"
+                    class="px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 transition-all disabled:opacity-50"
+                  >
+                    {{ deletingId === issue.id ? 'Deleting...' : 'Delete' }}
+                  </button>
+
+                  <button
+                    type="button"
+                    :disabled="confirmingId === issue.id"
+                    @click="confirmIssue(issue.id)"
+                    class="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 transition-all disabled:opacity-50"
+                  >
+                    {{ confirmingId === issue.id ? 'Confirming...' : '+ Confirm / Me Too' }}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -682,15 +870,32 @@ onMounted(async () => {
           </div>
         </div>
 
-        <div class="flex items-center justify-between pt-2 gap-3">
-          <button
-            type="button"
-            :disabled="confirmingId === selectedIssue.id"
-            @click="confirmIssue(selectedIssue.id)"
-            class="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-sm disabled:opacity-50"
-          >
-            {{ confirmingId === selectedIssue.id ? 'Confirming...' : '+ Confirm / Me Too' }}
-          </button>
+        <div class="flex items-center justify-between pt-2 gap-3 flex-wrap">
+          <div class="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              @click="openEditModal(selectedIssue)"
+              class="px-3.5 py-2.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 font-bold text-sm"
+            >
+              Edit
+            </button>
+            <button
+              type="button"
+              :disabled="deletingId === selectedIssue.id"
+              @click="deleteIssue(selectedIssue.id)"
+              class="px-3.5 py-2.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-bold text-sm disabled:opacity-50"
+            >
+              {{ deletingId === selectedIssue.id ? 'Deleting...' : 'Delete' }}
+            </button>
+            <button
+              type="button"
+              :disabled="confirmingId === selectedIssue.id"
+              @click="confirmIssue(selectedIssue.id)"
+              class="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-sm disabled:opacity-50"
+            >
+              {{ confirmingId === selectedIssue.id ? 'Confirming...' : '+ Confirm / Me Too' }}
+            </button>
+          </div>
           <button
             type="button"
             @click="selectedIssue = null"
@@ -699,6 +904,66 @@ onMounted(async () => {
             Close
           </button>
         </div>
+      </div>
+    </div>
+
+    <div
+      v-if="editingIssue"
+      class="fixed inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center z-50 p-4"
+      @click.self="editingIssue = null"
+    >
+      <div class="bg-white rounded-3xl max-w-lg w-full p-7 shadow-2xl border border-gray-100 space-y-4">
+        <div class="flex justify-between items-center">
+          <h2 class="text-xl font-extrabold text-gray-900">Edit Report #{{ editingIssue.id }}</h2>
+          <button
+            type="button"
+            @click="editingIssue = null"
+            class="w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-600 font-bold flex items-center justify-center"
+          >
+            &times;
+          </button>
+        </div>
+
+        <form @submit.prevent="saveEditedIssue" class="space-y-4">
+          <div>
+            <label class="block text-xs font-bold text-gray-700 uppercase mb-1">Issue Title</label>
+            <input
+              v-model="editForm.title"
+              type="text"
+              required
+              class="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-sm focus:bg-white focus:ring-2 focus:ring-blue-500 outline-none"
+            />
+          </div>
+
+          <div>
+            <label class="block text-xs font-bold text-gray-700 uppercase mb-1">Description</label>
+            <textarea
+              v-model="editForm.description"
+              required
+              rows="3"
+              class="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-sm focus:bg-white focus:ring-2 focus:ring-blue-500 outline-none"
+            ></textarea>
+          </div>
+
+          <p v-if="editError" class="text-xs text-rose-600">{{ editError }}</p>
+
+          <div class="flex space-x-3 pt-2">
+            <button
+              type="button"
+              @click="editingIssue = null"
+              class="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold py-3 rounded-xl text-sm"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              :disabled="isSavingEdit"
+              class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl text-sm disabled:opacity-50"
+            >
+              {{ isSavingEdit ? 'Saving...' : 'Save Changes' }}
+            </button>
+          </div>
+        </form>
       </div>
     </div>
 
@@ -793,6 +1058,71 @@ onMounted(async () => {
             </button>
           </div>
           <p v-if="submitError" class="text-xs text-rose-600 text-center">{{ submitError }}</p>
+        </form>
+      </div>
+    </div>
+
+    <div
+      v-if="isAdminLoginOpen"
+      class="fixed inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center z-[60] p-4"
+      @click.self="cancelAdminLogin"
+    >
+      <div class="bg-white rounded-3xl max-w-md w-full p-7 shadow-2xl border border-gray-100 space-y-5">
+        <div>
+          <h2 class="text-xl font-extrabold text-gray-900">Admin verification</h2>
+          <p class="text-sm text-gray-500 mt-1">
+            Admin credentials are required to edit or delete an issue. They are kept only for this page session.
+          </p>
+        </div>
+
+        <form @submit.prevent="loginForAdminAction" class="space-y-4">
+          <div>
+            <label for="issue-admin-username" class="block text-xs font-bold text-gray-700 uppercase mb-1">
+              Username
+            </label>
+            <input
+              id="issue-admin-username"
+              v-model="adminUsername"
+              type="text"
+              autocomplete="username"
+              required
+              class="w-full border border-gray-300 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+            />
+          </div>
+          <div>
+            <label for="issue-admin-password" class="block text-xs font-bold text-gray-700 uppercase mb-1">
+              Password
+            </label>
+            <input
+              id="issue-admin-password"
+              v-model="adminPassword"
+              type="password"
+              autocomplete="current-password"
+              required
+              class="w-full border border-gray-300 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+            />
+          </div>
+
+          <p v-if="adminLoginError" role="alert" class="text-xs text-rose-600">
+            {{ adminLoginError }}
+          </p>
+
+          <div class="flex gap-3 pt-1">
+            <button
+              type="button"
+              @click="cancelAdminLogin"
+              class="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold py-3 rounded-xl text-sm"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              :disabled="isAuthenticatingAdmin"
+              class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl text-sm disabled:opacity-50"
+            >
+              {{ isAuthenticatingAdmin ? 'Verifying...' : 'Continue' }}
+            </button>
+          </div>
         </form>
       </div>
     </div>
